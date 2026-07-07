@@ -2,9 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
-from openai import OpenAI
 
-# Configuration de la page mobile
+# Configuration de l'affichage mobile
 st.set_page_config(page_title="FX & Crypto Flow", page_icon="⚡", layout="centered")
 
 st.markdown("""
@@ -24,12 +23,6 @@ st.markdown("""
 
 st.title("⚡ FX & Crypto Flow")
 
-# Récupération de la clé API sécurisée dans tes Secrets Streamlit
-try:
-    api_key = st.secrets["OPENROUTER_API_KEY"]
-except Exception:
-    api_key = None
-
 # Sélection du marché
 asset_type = st.radio("Type de marché :", ["Forex", "Crypto"], horizontal=True)
 
@@ -41,58 +34,70 @@ else:
     ticker_symbol = crypto_choice
 
 adx_period = 14
-ema_trend_period = 200
 adx_threshold = 20
 
-tf_map = {
-    "5 min (Signal)": "5m",
-    "15 min (Intermédiaire)": "15m",
-    "1H (Fond)": "1h"
-}
-
-def fetch_yfinance_data(ticker, timeframe):
+# Extraction propre de la Tendance de Fond (1H) avec EMA 200
+def get_macro_trend(ticker):
     try:
-        period = "5d" if timeframe in ["5m", "15m"] else "1mo"
-        ticker_obj = yf.Ticker(ticker)
-        df = ticker_obj.history(interval=timeframe, period=period)
-        
-        if df.empty or len(df) < ema_trend_period:
-            return None
-            
-        # Calcul strict des indicateurs (DMI + EMA)
-        dmi = ta.adx(df['High'], df['Low'], df['Close'], length=adx_period)
-        ema = ta.ema(df['Close'], length=ema_trend_period)
+        # On demande 1 mois de données en 1H, largement suffisant pour l'EMA 200
+        df_1h = yf.Ticker(ticker).history(interval="1h", period="1mo")
+        if df_1h.empty or len(df_1h) < 200:
+            return None, None
+        ema_200 = ta.ema(df_1h['Close'], length=200)
+        dmi_1h = ta.adx(df_1h['High'], df_1h['Low'], df_1h['Close'], length=adx_period)
         
         return {
-            "close": df['Close'].iloc[-1],
-            "EMA": ema.iloc[-1] if ema is not None else None,
-            "ADX": round(dmi[f"ADX_{adx_period}"].iloc[-1], 1),
+            "close": df_1h['Close'].iloc[-1],
+            "EMA_200": ema_200.iloc[-1],
+            "DI+": round(dmi_1h[f"DMP_{adx_period}"].iloc[-1], 1),
+            "DI-": round(dmi_1h[f"DMN_{adx_period}"].iloc[-1], 1),
+            "ADX": round(dmi_1h[f"ADX_{adx_period}"].iloc[-1], 1)
+        }, df_1h['Close'].iloc[-1]
+    except:
+        return None, None
+
+# Extraction chirurgicale des petites UT (5m et 15m) pour le DMI pur
+def get_scalping_dmi(ticker, tf):
+    try:
+        # Consommation minimale de données (5 jours suffisent amplement pour un DMI 14)
+        df = yf.Ticker(ticker).history(interval=tf, period="5d")
+        if df.empty or len(df) < adx_period:
+            return None
+        dmi = ta.adx(df['High'], df['Low'], df['Close'], length=adx_period)
+        return {
             "DI+": round(dmi[f"DMP_{adx_period}"].iloc[-1], 1),
-            "DI-": round(dmi[f"DMN_{adx_period}"].iloc[-1], 1)
+            "DI-": round(dmi[f"DMN_{adx_period}"].iloc[-1], 1),
+            "ADX": round(dmi[f"ADX_{adx_period}"].iloc[-1], 1)
         }
-    except Exception as e:
+    except:
         return None
 
-# --- CALCULS ---
-with st.spinner("Analyse des flux mathématiques..."):
-    data_1h = fetch_yfinance_data(ticker_symbol, "1h")
-    data_15m = fetch_yfinance_data(ticker_symbol, "15m")
-    data_5m = fetch_yfinance_data(ticker_symbol, "5m")
+# --- CRÉATION DE L'INTERFACE EN DIRECT ---
+with st.spinner("Calcul des structures de flux..."):
+    macro_data, current_price = get_macro_trend(ticker_symbol)
+    data_15m = get_scalping_dmi(ticker_symbol, "15m")
+    data_5m = get_scalping_dmi(ticker_symbol, "5m")
 
-if data_1h and data_15m and data_5m and data_1h["EMA"] is not None:
-    # Tendance de Fond (EMA 200 sur le 1H)
-    is_macro_bull = data_1h["close"] > data_1h["EMA"]
-    macro_status = "🟩 HAUSSIER" if is_macro_bull else "🟥 BAISSIER"
+if macro_data and data_15m and data_5m:
+    # Validation du biais macro
+    is_macro_bull = macro_data["close"] > macro_data["EMA_200"]
+    macro_status = "🟩 HAUSSIER (Prix > EMA200)" if is_macro_bull else "🟥 BAISSIER (Prix < EMA200)"
     
     st.subheader(f"Tendance Macro 1H : {macro_status}")
-    st.write(f"Prix actuel : **{round(data_5m['close'], 5)}**")
+    st.write(f"Prix en direct : **{round(current_price, 5)}**")
     st.write("---")
     
-    # Rendu des blocs pour le mobile
-    for name, tf_code in tf_map.items():
-        data = data_5m if "5 min" in name else (data_15m if "15 min" in name else data_1h)
+    # Association pour l'affichage ordonné
+    tf_dashboard = [
+        ("5 min (Signal)", data_5m),
+        ("15 min (Intermédiaire)", data_15m),
+        ("1H (Structure)", {"DI+": macro_data["DI+"], "DI-": macro_data["DI-"], "ADX": macro_data["ADX"]})
+    ]
+    
+    for name, data in tf_dashboard:
         di_p, di_m, adx = data["DI+"], data["DI-"], data["ADX"]
         
+        # Logique stricte d'alignement des forces
         if di_p > di_m and adx > adx_threshold:
             signal_html = '<span class="buy-text">🚀 ACHAT ALIGNÉ</span>' if is_macro_bull else '<span class="buy-text">⚠️ ACHAT CONTRE-TENDANCE</span>'
         elif di_m > di_p and adx > adx_threshold:
@@ -114,7 +119,7 @@ if data_1h and data_15m and data_5m and data_1h["EMA"] is not None:
             </div>
         """, unsafe_allow_html=True)
         
-    if st.button("🔄 Rafraîchir les cours"):
+    if st.button("🔄 Actualiser le flux"):
         st.rerun()
 else:
-    st.error("Données indisponibles (Vérifie que la bourse est ouverte si tu es sur le Forex, ou attends quelques secondes).")
+    st.error("Calcul impossible. Si nous sommes le week-end, assure-toi de sélectionner 'Crypto' car les marchés Forex sont fermés.")
