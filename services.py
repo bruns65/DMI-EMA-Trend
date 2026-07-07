@@ -47,8 +47,10 @@ def get_bybit_candles(symbol, interval, limit=200):
     try:
         bybit_intervals = {"5m": "5", "15m": "15", "1h": "60"}
         pair = f"{symbol.upper()}USDT"
-        url = f"https://api.bybit.com/v5/market/kline?category={category if 'category' in locals() else 'spot'}&symbol={pair}&interval={bybit_intervals.get(interval, '60')}&limit={limit}"
+        # Correction : Ajout de la category en dur dans l'URL pour éviter le retour vide
+        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval={bybit_intervals.get(interval, '60')}&limit={limit}"
         res = requests.get(url, timeout=4).json()
+        
         df = pd.DataFrame(res['result']['list'])[::-1].reset_index(drop=True)
         df.columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Turnover']
         df['High'] = df['High'].astype(float)
