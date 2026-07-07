@@ -23,7 +23,7 @@ st.markdown("""
 
 st.title("⚡ FX & Crypto Flow Direct")
 
-# --- CONFIGURATION TELEGRAM CONFIGURÉE EN DUR ---
+# --- CONFIGURATION TELEGRAM ---
 TG_TOKEN = "8674377212:AAGIxMfDkNsDgTDkpEby-IWbV9NAhyZpvxw"
 TG_CHAT_ID = "7864537791"
 
@@ -35,10 +35,9 @@ def send_telegram_alert(message):
     except:
         pass
 
-# Bouton de test rapide dans la barre latérale pour valider la réception sur ton phone
 if st.sidebar.button("🧪 Tester la connexion Telegram"):
     send_telegram_alert("⚡ *Test Alerte* : Ton application FX & Crypto Flow est connectée avec succès !")
-    st.sidebar.success("Signal de test envoyé ! Regarde ton Telegram.")
+    st.sidebar.success("Signal de test envoyé !")
 
 # Sélection du Marché
 asset_type = st.radio("Type de marché :", ["Forex", "Crypto"], horizontal=True)
@@ -47,21 +46,21 @@ if asset_type == "Forex":
     fx_choice = st.selectbox("Paire Forex :", ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"])
     ticker_symbol = fx_choice
 else:
-    api_source = st.radio("Source Crypto :", ["Hyperliquid (Perps)", "Binance (Spot)"], horizontal=True)
+    api_source = st.radio("Source Crypto :", ["Binance (Spot)", "Hyperliquid (Perps)"], horizontal=True)
     crypto_choice = st.selectbox("Actif Crypto :", ["BTC", "ETH", "SOL"])
     ticker_symbol = crypto_choice
 
 adx_period = 14
 adx_threshold = 20
 
-# --- APIS EXTRACTION ---
+# --- APIS EXTRACTION SÉCURISÉES ---
 def get_forex_candles(pair, interval):
     try:
-        clean_pair = pair.replace("/", "")
+        clean_pair = pair.replace("/", "").upper()
         spot_url = "https://open.er-api.com/v6/latest/USD"
         res_spot = requests.get(spot_url, timeout=4).json()
-        base_currency = pair.split("/")[0]
-        target_currency = pair.split("/")[1]
+        base_currency = clean_pair[:3]
+        target_currency = clean_pair[3:]
         
         rate = res_spot["rates"][target_currency] if base_currency == "USD" else 1 / res_spot["rates"][base_currency]
         if base_currency != "USD" and target_currency != "USD":
@@ -82,11 +81,15 @@ def get_forex_candles(pair, interval):
 
 def get_binance_candles(symbol, interval, limit=250):
     try:
-        pair = f"{symbol}USDT"
+        # Force la paire en majuscules pour éviter le rejet de l'API Binance
+        pair = f"{symbol.upper()}USDT"
         url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={interval}&limit={limit}"
         res = requests.get(url, timeout=4).json()
+        
         df = pd.DataFrame(res, columns=['Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'CloseTime', 'AssetVolume', 'Trades', 'TakerBuyBase', 'TakerBuyQuote', 'Ignore'])
-        df['High'], df['Low'], df['Close'] = df['High'].astype(float), df['Low'].astype(float), df['Close'].astype(float)
+        df['High'] = df['High'].astype(float)
+        df['Low'] = df['Low'].astype(float)
+        df['Close'] = df['Close'].astype(float)
         return df
     except:
         return None
@@ -97,10 +100,12 @@ def get_hyperliquid_candles(symbol, interval, limit=250):
         url = "https://api.hyperliquid.xyz/info"
         now_ms = int(time.time() * 1000)
         duration_ms = limit * 60 * 1000 if interval == "5m" else limit * 15 * 60 * 1000 if interval == "15m" else limit * 60 * 60 * 1000
-        payload = {"type": "candleSnapshot", "req": {"coin": symbol, "interval": hl_intervals.get(interval, "1h"), "startTime": now_ms - duration_ms}}
+        payload = {"type": "candleSnapshot", "req": {"coin": symbol.upper(), "interval": hl_intervals.get(interval, "1h"), "startTime": now_ms - duration_ms}}
         res = requests.post(url, json=payload, timeout=4).json()
         df = pd.DataFrame(res)[::-1].reset_index(drop=True).rename(columns={'h': 'High', 'l': 'Low', 'c': 'Close'})
-        df['High'], df['Low'], df['Close'] = df['High'].astype(float), df['Low'].astype(float), df['Close'].astype(float)
+        df['High'] = df['High'].astype(float)
+        df['Low'] = df['Low'].astype(float)
+        df['Close'] = df['Close'].astype(float)
         return df
     except:
         return None
@@ -127,9 +132,9 @@ def compute_dmi_and_ema(df, compute_ema=False):
     except:
         return None
 
-# Execution
+# Récupération
 data_1h, data_15m, data_5m = None, None, None
-with st.spinner("Analyse des flux en direct..."):
+with st.spinner("Mise à jour des flux..."):
     if asset_type == "Forex":
         df_1h, df_15m, df_5m = get_forex_candles(ticker_symbol, "1h"), get_forex_candles(ticker_symbol, "15m"), get_forex_candles(ticker_symbol, "5m")
     else:
@@ -141,16 +146,15 @@ with st.spinner("Analyse des flux en direct..."):
         data_15m = compute_dmi_and_ema(df_15m)
         data_5m = compute_dmi_and_ema(df_5m)
 
-# Rendu et vérification des signaux
+# Affichage des cartes sans le bloc d'erreur générique
 if data_1h and data_15m and data_5m:
     is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
     macro_status = "🟩 HAUSSIER" if is_macro_bull else "🟥 BAISSIER"
     
     st.subheader(f"Tendance Macro 1H : {macro_status}")
-    st.write(f"Prix actuel : **{round(data_5m['close'], 5)}**")
+    st.write(f"Prix {ticker_symbol} : **{round(data_5m['close'], 5 if asset_type == 'Forex' else 2)}**")
     st.write("---")
     
-    # Extraction des données pour le signal d'alerte (UT 5 min)
     p_5m, m_5m, a_5m = data_5m["DI+"], data_5m["DI-"], data_5m["ADX"]
     
     alert_triggered = False
@@ -158,14 +162,14 @@ if data_1h and data_15m and data_5m:
     
     if p_5m > m_5m and a_5m > adx_threshold and is_macro_bull:
         alert_triggered = True
-        alert_msg = f"🚀 *SIGNAL ACHAT ALIGNÉ*\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n• ADX 5m : {a_5m} (Tendance Forte)"
+        alert_msg = f"🚀 *SIGNAL ACHAT ALIGNÉ*\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n• ADX 5m : {a_5m}"
     elif m_5m > p_5m and a_5m > adx_threshold and not is_macro_bull:
         alert_triggered = True
-        alert_msg = f"💥 *SIGNAL VENTE ALIGNÉE*\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n• ADX 5m : {a_5m} (Tendance Forte)"
+        alert_msg = f"💥 *SIGNAL VENTE ALIGNÉE*\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n• ADX 5m : {a_5m}"
 
     if alert_triggered:
         send_telegram_alert(alert_msg)
-        st.success("🔔 Alerte Telegram envoyée sur ton téléphone !")
+        st.success("🔔 Alerte Telegram envoyée !")
 
     tf_dashboard = [("5 min (Signal)", data_5m), ("15 min (Intermédiaire)", data_15m), ("1H (Structure)", data_1h)]
     for name, data in tf_dashboard:
@@ -184,8 +188,6 @@ if data_1h and data_15m and data_5m:
                 <div style="margin-top: 8px;">{html}</div>
             </div>
         """, unsafe_allow_html=True)
-else:
-    st.error("Erreur de récupération des flux direct.")
 
 if st.button("🔄 Actualiser les structures"):
     st.rerun()
