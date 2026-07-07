@@ -1,4 +1,4 @@
-yfinance
-pandas
-pandas_ta
-streamlit
+pandas==2.2.2
+pandas-ta==0.3.14b
+yfinance>=0.2.40
+openai
