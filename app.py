@@ -40,7 +40,7 @@ if st.sidebar.button("🧪 Tester la connexion Telegram"):
     st.sidebar.success("Signal de test envoyé !")
 
 # Sélection du Marché
-asset_type = st.radio("Type de marché :", ["Forex", "Crypto"], horizontal=True)
+asset_type = st.radio("Type de marché :", ["Crypto", "Forex"], horizontal=True)
 
 if asset_type == "Forex":
     fx_choice = st.selectbox("Paire Forex :", ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"])
@@ -53,7 +53,7 @@ else:
 adx_period = 14
 adx_threshold = 20
 
-# --- APIS EXTRACTION SÉCURISÉES ---
+# --- APIS EXTRACTION ---
 def get_forex_candles(pair, interval):
     try:
         clean_pair = pair.replace("/", "").upper()
@@ -71,17 +71,17 @@ def get_forex_candles(pair, interval):
         price_series = rate * (1 + returns).cumprod()
         price_series = price_series * (rate / price_series[-1])
         
-        return pd.DataFrame({
+        df = pd.DataFrame({
             'Close': price_series,
             'High': price_series * (1 + abs(np.random.normal(0, 0.0002, 250))),
             'Low': price_series * (1 - abs(np.random.normal(0, 0.0002, 250)))
         })
+        return df
     except:
         return None
 
 def get_binance_candles(symbol, interval, limit=250):
     try:
-        # Force la paire en majuscules pour éviter le rejet de l'API Binance
         pair = f"{symbol.upper()}USDT"
         url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={interval}&limit={limit}"
         res = requests.get(url, timeout=4).json()
@@ -101,7 +101,8 @@ def get_hyperliquid_candles(symbol, interval, limit=250):
         now_ms = int(time.time() * 1000)
         duration_ms = limit * 60 * 1000 if interval == "5m" else limit * 15 * 60 * 1000 if interval == "15m" else limit * 60 * 60 * 1000
         payload = {"type": "candleSnapshot", "req": {"coin": symbol.upper(), "interval": hl_intervals.get(interval, "1h"), "startTime": now_ms - duration_ms}}
-        res = requests.post(url, json=payload, timeout=4).json()
+        res = requests.post(url, json=payload, headers=headers if 'headers' in locals() else {}, timeout=4).json()
+        
         df = pd.DataFrame(res)[::-1].reset_index(drop=True).rename(columns={'h': 'High', 'l': 'Low', 'c': 'Close'})
         df['High'] = df['High'].astype(float)
         df['Low'] = df['Low'].astype(float)
@@ -110,26 +111,47 @@ def get_hyperliquid_candles(symbol, interval, limit=250):
     except:
         return None
 
-# --- CALCULS ---
+# --- CALCULS CORRIGÉS (TRUE WILDER FORMULA) ---
 def compute_dmi_and_ema(df, compute_ema=False):
     try:
         if compute_ema:
             df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
-        df['plus_dm'] = df['High'].diff()
-        df['minus_dm'] = df['Low'].diff(-1)
-        df['plus_dm'] = np.where((df['plus_dm'] > df['minus_dm']) & (df['plus_dm'] > 0), df['plus_dm'], 0)
-        df['minus_dm'] = np.where((df['minus_dm'] > df['plus_dm']) & (df['minus_dm'] > 0), df['minus_dm'], 0)
-        df['TR'] = df[['High', 'Low', 'Close']].max(axis=1)
+        
+        # Calcul du Directional Movement (DM)
+        df['up_move'] = df['High'].diff()
+        df['down_move'] = df['Low'].diff(-1) # Différence par rapport au suivant pour le sens
+        df['down_move'] = df['Low'].shift(1) - df['Low'] # Correction du sens standard
+        
+        df['plus_dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
+        df['minus_dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
+        
+        # Vraie formule de la True Range (TR)
+        df['tr1'] = df['High'] - df['Low']
+        df['tr2'] = abs(df['High'] - df['Close'].shift(1))
+        df['tr3'] = abs(df['Low'] - df['Close'].shift(1))
+        df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+        
+        # Lissage de Wilder (RMA)
         df['TR_smooth'] = df['TR'].ewm(alpha=1/adx_period, adjust=False).mean()
         df['DM_plus_smooth'] = df['plus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
         df['DM_minus_smooth'] = df['minus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
+        
+        # Calcul des Directional Indicators (DI)
         df['DI_plus'] = (df['DM_plus_smooth'] / df['TR_smooth']) * 100
         df['DI_minus'] = (df['DM_minus_smooth'] / df['TR_smooth']) * 100
+        
+        # Calcul de l'ADX
         df['DX'] = (abs(df['DI_plus'] - df['DI_minus']) / (df['DI_plus'] + df['DI_minus'])) * 100
         df['ADX'] = df['DX'].ewm(alpha=1/adx_period, adjust=False).mean()
         
-        return {"close": df['Close'].iloc[-1], "DI+": round(df['DI_plus'].iloc[-1], 1), "DI-": round(df['DI_minus'].iloc[-1], 1), "ADX": round(df['ADX'].iloc[-1], 1), "EMA_200": df['EMA_200'].iloc[-1] if compute_ema else None}
-    except:
+        return {
+            "close": df['Close'].iloc[-1], 
+            "DI+": round(df['DI_plus'].iloc[-1], 1), 
+            "DI-": round(df['DI_minus'].iloc[-1], 1), 
+            "ADX": round(df['ADX'].iloc[-1], 1), 
+            "EMA_200": df['EMA_200'].iloc[-1] if compute_ema else None
+        }
+    except Exception as e:
         return None
 
 # Récupération
@@ -146,7 +168,7 @@ with st.spinner("Mise à jour des flux..."):
         data_15m = compute_dmi_and_ema(df_15m)
         data_5m = compute_dmi_and_ema(df_5m)
 
-# Affichage des cartes sans le bloc d'erreur générique
+# Affichage des cartes
 if data_1h and data_15m and data_5m:
     is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
     macro_status = "🟩 HAUSSIER" if is_macro_bull else "🟥 BAISSIER"
