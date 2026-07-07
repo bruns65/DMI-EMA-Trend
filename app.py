@@ -1,7 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 
 # Configuration de l'affichage mobile
 st.set_page_config(page_title="FX & Crypto Flow", page_icon="⚡", layout="centered")
@@ -36,78 +36,75 @@ else:
 adx_period = 14
 adx_threshold = 20
 
-# Extraction propre de la Tendance de Fond (1H) avec EMA 200
-def get_macro_trend(ticker):
+# --- CALCULS MATHÉMATIQUES NATIFS (Pas besoin de pandas_ta) ---
+def compute_indicators(df):
     try:
-        df_1h = yf.Ticker(ticker).history(interval="1h", period="3mo")
-        if df_1h.empty or len(df_1h) < 200:
-            return {"error": f"Historique insuffisant (1H): {len(df_1h)} bougies récupérées."}, None
-            
-        # Nettoyage des valeurs manquantes pour éviter le crash de pandas_ta
-        df_1h = df_1h.dropna(subset=['High', 'Low', 'Close'])
+        # 1. Calcul de l'EMA 200 (Tendance de fond)
+        df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
         
-        ema_200 = ta.ema(df_1h['Close'], length=200)
-        dmi_1h = ta.adx(df_1h['High'], df_1h['Low'], df_1h['Close'], length=adx_period)
+        # 2. Calcul du DMI (DI+, DI-, ADX)
+        df['plus_dm'] = df['High'].diff()
+        df['minus_dm'] = df['Low'].diff(-1)
         
-        if dmi_1h is None or ema_200 is None:
-            return {"error": "Calcul des indicateurs 1H impossible."}, None
-            
+        df['plus_dm'] = np.where((df['plus_dm'] > df['minus_dm']) & (df['plus_dm'] > 0), df['plus_dm'], 0)
+        df['minus_dm'] = np.where((df['minus_dm'] > df['plus_dm']) & (df['minus_dm'] > 0), df['minus_dm'], 0)
+        
+        # True Range
+        df['tr1'] = df['High'] - df['Low']
+        df['tr2'] = abs(df['High'] - df['Close'].shift(1))
+        df['tr3'] = abs(df['Low'] - df['Close'].shift(1))
+        df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+        
+        # Lissage Wilder
+        df['TR_smooth'] = df['TR'].ewm(alpha=1/adx_period, adjust=False).mean()
+        df['DM_plus_smooth'] = df['plus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
+        df['DM_minus_smooth'] = df['minus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
+        
+        df['DI_plus'] = (df['DM_plus_smooth'] / df['TR_smooth']) * 100
+        df['DI_minus'] = (df['DM_minus_smooth'] / df['TR_smooth']) * 100
+        
+        # DX & ADX
+        df['DX'] = (abs(df['DI_plus'] - df['DI_minus']) / (df['DI_plus'] + df['DI_minus'])) * 100
+        df['ADX'] = df['DX'].ewm(alpha=1/adx_period, adjust=False).mean()
+        
         return {
-            "close": df_1h['Close'].iloc[-1],
-            "EMA_200": ema_200.iloc[-1],
-            "DI+": round(dmi_1h[f"DMP_{adx_period}"].iloc[-1], 1),
-            "DI-": round(dmi_1h[f"DMN_{adx_period}"].iloc[-1], 1),
-            "ADX": round(dmi_1h[f"ADX_{adx_period}"].iloc[-1], 1)
-        }, df_1h['Close'].iloc[-1]
-    except Exception as e:
-        return {"error": f"Exception Macro 1H : {str(e)}"}, None
-
-# Extraction chirurgicale des petites UT (5m et 15m) pour le DMI pur
-def get_scalping_dmi(ticker, tf):
-    try:
-        df = yf.Ticker(ticker).history(interval=tf, period="5d")
-        if df.empty or len(df) < adx_period:
-            return {"error": f"Historique insuffisant ({tf})."}
-            
-        df = df.dropna(subset=['High', 'Low', 'Close'])
-        dmi = ta.adx(df['High'], df['Low'], df['Close'], length=adx_period)
-        
-        if dmi is None:
-            return {"error": f"Calcul DMI ({tf}) impossible."}
-            
-        return {
-            "DI+": round(dmi[f"DMP_{adx_period}"].iloc[-1], 1),
-            "DI-": round(dmi[f"DMN_{adx_period}"].iloc[-1], 1),
-            "ADX": round(dmi[f"ADX_{adx_period}"].iloc[-1], 1)
+            "close": df['Close'].iloc[-1],
+            "EMA_200": df['EMA_200'].iloc[-1],
+            "DI+": round(df['DI_plus'].iloc[-1], 1),
+            "DI-": round(df['DI_minus'].iloc[-1], 1),
+            "ADX": round(df['ADX'].iloc[-1], 1)
         }
-    except Exception as e:
-        return {"error": f"Exception DMI {tf} : {str(e)}"}
+    except:
+        return None
 
-# --- CRÉATION DE L'INTERFACE EN DIRECT ---
-with st.spinner("Calcul des structures de flux..."):
-    macro_data, current_price = get_macro_trend(ticker_symbol)
-    data_15m = get_scalping_dmi(ticker_symbol, "15m")
-    data_5m = get_scalping_dmi(ticker_symbol, "5m")
+def get_data_for_tf(ticker, tf, period):
+    try:
+        df = yf.Ticker(ticker).history(interval=tf, period=period)
+        if df.empty or len(df) < 201:
+            return None
+        return compute_indicators(df)
+    except:
+        return None
 
-# Vérification s'il y a des erreurs de flux
-if macro_data and "error" in macro_data:
-    st.error(macro_data["error"])
-elif data_15m and "error" in data_15m:
-    st.error(data_15m["error"])
-elif data_5m and "error" in data_5m:
-    st.error(data_5m["error"])
-elif macro_data and data_15m and data_5m:
-    is_macro_bull = macro_data["close"] > macro_data["EMA_200"]
+# --- EXTRACTION ---
+with st.spinner("Analyse des flux mathématiques..."):
+    # On demande assez de données pour l'EMA 200 sur chaque unité de temps
+    data_1h = get_data_for_tf(ticker_symbol, "1h", "1mo") if asset_type == "Forex" else get_data_for_tf(ticker_symbol, "1h", "1mo")
+    data_15m = get_data_for_tf(ticker_symbol, "15m", "5d")
+    data_5m = get_data_for_tf(ticker_symbol, "5m", "5d")
+
+if data_1h and data_15m and data_5m:
+    is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
     macro_status = "🟩 HAUSSIER (Prix > EMA200)" if is_macro_bull else "🟥 BAISSIER (Prix < EMA200)"
     
     st.subheader(f"Tendance Macro 1H : {macro_status}")
-    st.write(f"Prix en direct : **{round(current_price, 5)}**")
+    st.write(f"Prix en direct : **{round(data_5m['close'], 5)}**")
     st.write("---")
     
     tf_dashboard = [
         ("5 min (Signal)", data_5m),
         ("15 min (Intermédiaire)", data_15m),
-        ("1H (Structure)", {"DI+": macro_data["DI+"], "DI-": macro_data["DI-"], "ADX": macro_data["ADX"]})
+        ("1H (Structure)", data_1h)
     ]
     
     for name, data in tf_dashboard:
@@ -137,4 +134,4 @@ elif macro_data and data_15m and data_5m:
     if st.button("🔄 Actualiser le flux"):
         st.rerun()
 else:
-    st.error("Une erreur inconnue empêche le chargement.")
+    st.error("Yahoo Finance ne renvoie pas assez d'historique pour l'EMA 200 sur ce marché actuellement. Réessaie dans quelques instants.")
