@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import requests
-import time
+from datetime import datetime, timedelta
 
 def get_forex_candles(pair):
     try:
@@ -43,16 +43,30 @@ def get_okx_candles(symbol, interval, limit=250):
     except:
         return None
 
-def get_bybit_candles(symbol, interval, limit=200):
+def get_coinbase_candles(symbol, interval, limit=150):
     try:
-        bybit_intervals = {"5m": "5", "15m": "15", "1h": "60"}
-        pair = f"{symbol.upper()}USDT"
-        # Correction : Ajout de la category en dur dans l'URL pour éviter le retour vide
-        url = f"https://api.bybit.com/v5/market/kline?category=spot&symbol={pair}&interval={bybit_intervals.get(interval, '60')}&limit={limit}"
-        res = requests.get(url, timeout=4).json()
+        # Conversion des intervalles pour Coinbase (en secondes)
+        cb_intervals = {"5m": 300, "15m": 900, "1h": 3600}
+        granularity = cb_intervals.get(interval, 3600)
+        pair = f"{symbol.upper()}-USDT"
         
-        df = pd.DataFrame(res['result']['list'])[::-1].reset_index(drop=True)
-        df.columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Turnover']
+        # Calcul des fenêtres de temps pour éviter les refus
+        end_time = datetime.utcnow()
+        start_time = end_time - timedelta(seconds=granularity * limit)
+        
+        url = f"https://api.exchange.coinbase.com/products/{pair}/candles"
+        params = {
+            "start": start_time.isoformat(),
+            "end": end_time.isoformat(),
+            "granularity": granularity
+        }
+        
+        res = requests.get(url, params=params, timeout=4).json()
+        
+        # Structure Coinbase : [time, low, high, open, close, volume]
+        # Trié du plus récent au plus ancien, on inverse
+        df = pd.DataFrame(res, columns=['Time', 'Low', 'High', 'Open', 'Close', 'Volume'])[::-1].reset_index(drop=True)
+        
         df['High'] = df['High'].astype(float)
         df['Low'] = df['Low'].astype(float)
         df['Close'] = df['Close'].astype(float)
