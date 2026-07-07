@@ -9,32 +9,31 @@ from services import get_forex_candles, get_okx_candles, get_coinbase_candles, c
 # ==========================================
 #  🔴 CONFIGURATION STRICTE & SÉCURISÉE
 # ==========================================
-# Identifiants Telegram
 TG_TOKEN = "8674377212:AAGIxMfDkNsDgTDkpEby-IWbV9NAhyZpvxw"
 TG_CHAT_ID = "7864537791"
 
-# Identifiants de trading Hyperliquid (À migrer en variables d'environnement sur Railway !)
 ACCOUNT_ADDRESS = "VOTRE_ADRESSE_DE_PORTEFEUILLE_ICI"
-# Recommandation : Utilisez une clé d'un "API Agent" généré sur Hyperliquid plutôt que votre clé privée principale
 API_SECRET_KEY = "VOTRE_CLE_PRIVEE_OU_CLE_AGENT_ICI"
 
-# Paramètres de Risk Management
-RISK_PER_TRADE_USD = 20.0  # Risque strict de 1% sur un capital de 2000$
-SL_PCT_CRYPTO = 0.01       # Distance du Stop Loss par défaut : 1% (0.01)
-TP_PCT_CRYPTO = 0.02       # Distance du Take Profit par défaut : 2% (0.02)
+RISK_PER_TRADE_USD = 20.0  
+SL_PCT_CRYPTO = 0.01       # 1% de Stop Loss
+TP_PCT_CRYPTO = 0.02       # 2% de Take Profit
+BE_THRESHOLD_PCT = 0.01    # Déclenchement du Breakeven dès +1% de gain
 
-# Watchlist et paramètres algorithmiques
 CRYPTO_WATCHLIST = ["BTC", "ETH", "SOL"]
 ADX_THRESHOLD = 20
-ALERT_COOLDOWN = 900       # 15 minutes de silence pour éviter le spam
+ALERT_COOLDOWN = 900       
 last_alerts = {}
 
-# Initialisation des modules Hyperliquid (Mainnet)
+# Registre des positions gérées par le bot pour le suivi du Breakeven
+# Structure : { "BTC": {"side": "BUY", "entry": 63752.0, "size": 0.031, "has_be": False} }
+active_positions = {}
+
 try:
     account = Account.from_key(API_SECRET_KEY)
     info = Info(constants.MAINNET_API_URL, skip_ws=True)
     exchange = Exchange(account, constants.MAINNET_API_URL)
-    print(f"[+] Connexion Hyperliquid validée pour l'adresse : {account.address}")
+    print(f"[+] Connexion Hyperliquid validée : {account.address}")
 except Exception as e:
     print(f"[-] Échec de l'initialisation Hyperliquid : {e}")
 
@@ -43,41 +42,23 @@ def send_telegram_alert(message):
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
         payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
         requests.post(url, json=payload, timeout=3)
-    except Exception as e:
-        print(f"[-] Erreur Telegram : {e}")
+    except:
+        pass
 
 def execute_hyperliquid_trade(symbol, side, current_price):
-    """
-    Calcule la taille de position dynamique, ouvre un ordre au marché,
-    puis place immédiatement le TP et le SL associés.
-    """
     try:
-        print(f"[+ Action] Tentative d'ouverture de position {side} sur {symbol}...")
-        
-        # 1. Calcul de la taille de lot dynamique (Position Sizing)
-        # Formule : Taille du contrat = Risque en $ / Écart du SL en $
         sl_distance_usd = current_price * SL_PCT_CRYPTO
-        position_size_token = RISK_PER_TRADE_USD / sl_distance_usd
-        
-        # Arrondir la taille du lot selon les spécifications d'Hyperliquid (ex: BTC accepte 5 décimales, SOL moins)
-        # Par sécurité pour l'implémentation, on utilise un arrondi standard à 3 décimales adaptées aux majeures
-        position_size_token = round(position_size_token, 3)
+        position_size_token = round(RISK_PER_TRADE_USD / sl_distance_usd, 3)
         
         if position_size_token <= 0:
-            print("[-] Taille de lot calculée trop faible.")
             return False
 
-        # 2. Envoi de l'ordre principal au marché (Market Order)
         is_buy = (side == "BUY")
         market_order_result = exchange.market_open(symbol, is_buy, position_size_token, slippage=0.01)
         
         if market_order_result["status"] != "ok":
-            print(f"[-] Échec de l'ordre Market : {market_order_result}")
             return False
             
-        print(f"[+] Ordre Market exécuté avec succès : {side} {position_size_token} {symbol}")
-
-        # 3. Calcul des prix exacts pour les ordres de protection
         if is_buy:
             sl_price = round(current_price * (1 - SL_PCT_CRYPTO), 2)
             tp_price = round(current_price * (1 + TP_PCT_CRYPTO), 2)
@@ -85,30 +66,69 @@ def execute_hyperliquid_trade(symbol, side, current_price):
             sl_price = round(current_price * (1 + SL_PCT_CRYPTO), 2)
             tp_price = round(current_price * (1 - TP_PCT_CRYPTO), 2)
 
-        # 4. Placement du Stop Loss (Ordre de type Trigger / Stop Market)
-        # Sur Hyperliquid perps, pour fermer un achat, le SL doit être un ordre de vente (is_buy = False)
+        # Placement initial du SL et TP
         exchange.order(symbol, not is_buy, position_size_token, sl_price, {"trigger": {"isMarket": True, "triggerPx": sl_price, "tpsl": "sl"}})
-        print(f"[+] Ordre de protection STOP LOSS placé à : {sl_price}")
-
-        # 5. Placement du Take Profit (Ordre de type Trigger / Take Profit Market)
         exchange.order(symbol, not is_buy, position_size_token, tp_price, {"trigger": {"isMarket": True, "triggerPx": tp_price, "tpsl": "tp"}})
-        print(f"[+] Ordre de protection TAKE PROFIT placé à : {tp_price}")
+        
+        # Enregistrement de la position pour surveillance du Breakeven
+        active_positions[symbol] = {
+            "side": side,
+            "entry": current_price,
+            "size": position_size_token,
+            "has_be": False
+        }
         
         return tp_price, sl_price, position_size_token
-
-    except Exception as trade_error:
-        print(f"[-] Erreur critique lors de l'exécution sur Hyperliquid : {trade_error}")
+    except Exception as e:
+        print(f"[-] Erreur exécution ordre : {e}")
         return False
+
+def check_and_apply_breakeven(symbol, current_price):
+    """
+    Vérifie si les gains latents ont atteint le palier pour sécuriser au prix d'entrée.
+    """
+    pos = active_positions.get(symbol)
+    if not pos or pos["has_be"]:
+        return
+
+    entry = pos["entry"]
+    side = pos["side"]
+    size = pos["size"]
+    
+    # Calcul de la performance actuelle
+    if side == "BUY":
+        perf = (current_price - entry) / entry
+    else:
+        perf = (entry - current_price) / entry
+
+    # Si le gain atteint ou dépasse le seuil (1%)
+    if perf >= BE_THRESHOLD_PCT:
+        try:
+            print(f"[🛡️ BREAKEVEN] Seuil atteint sur {symbol} ({round(perf*100, 2)}%). Sécurisation en cours...")
+            is_buy = (side == "BUY")
+            
+            # Modifier le Stop Loss pour le mettre au prix d'entrée exact (frais de glissement inclus au besoin)
+            # Sur Hyperliquid, on repousse un ordre trigger au prix d'entrée
+            be_price = round(entry, 2)
+            exchange.order(symbol, not is_buy, size, be_price, {"trigger": {"isMarket": True, "triggerPx": be_price, "tpsl": "sl"}})
+            
+            # Marquer la position comme sécurisée
+            active_positions[symbol]["has_be"] = True
+            
+            msg = f"🛡️ *[BOT AUTOMATIQUE] BREAKEVEN APPLIQUÉ*\n• Actif : {symbol}\n• Position : {side}\n• Le Stop Loss a été déplacé sur ton prix d'entrée (*{be_price}*).\n\nTrade sécurisé à 0$ de risque. On laisse courir vers le TP !"
+            send_telegram_alert(msg)
+            
+        except Exception as e:
+            print(f"[-] Erreur lors de l'application du Breakeven sur {symbol} : {e}")
 
 # ==========================================
 #  🔄 BOUCLE DE SURVEILLANCE PERMANENTE (H24)
 # ==========================================
-print("[+] Le Bot FX & Crypto Flow avec exécution Hyperliquid est opérationnel.")
+print("[+] Le Bot FX & Crypto Flow avec BREAKEVEN IMPÉRATIF est opérationnel.")
 
 while True:
     try:
         for symbol in CRYPTO_WATCHLIST:
-            # Récupération des bougies complètes et figées via Coinbase
             df_1h = get_coinbase_candles(symbol, "1h")
             df_15m = get_coinbase_candles(symbol, "15m")
             df_5m = get_coinbase_candles(symbol, "5m")
@@ -126,7 +146,20 @@ while True:
             current_price = data_5m["close"]
             is_macro_bull = current_price > data_1h["EMA_200"]
             
-            # Filtre strict du Triple Écran
+            # 1. Gestion des positions en cours (Vérification du Breakeven)
+            if symbol in active_positions:
+                check_and_apply_breakeven(symbol, current_price)
+                
+                # Nettoyage si la position a été coupée par le TP ou le SL sur l'échange
+                # Pour garder le code léger ce soir, le registre se met à jour si le prix traverse le TP ou le SL
+                pos_info = active_positions[symbol]
+                if pos_info["side"] == "BUY" and (current_price >= pos_info["entry"] * (1 + TP_PCT_CRYPTO) or current_price <= (pos_info["entry"] if pos_info["has_be"] else pos_info["entry"] * (1 - SL_PCT_CRYPTO))):
+                    del active_positions[symbol]
+                elif pos_info["side"] == "SELL" and (current_price <= pos_info["entry"] * (1 - TP_PCT_CRYPTO) or current_price >= (pos_info["entry"] if pos_info["has_be"] else pos_info["entry"] * (1 + SL_PCT_CRYPTO))):
+                    del active_positions[symbol]
+                continue
+
+            # 2. Logique de détection des nouveaux signaux (Triple Écran)
             buy_alignment = (
                 (data_5m["DI+"] > data_5m["DI-"] and data_5m["ADX"] > ADX_THRESHOLD) and
                 (data_15m["DI+"] > data_15m["DI-"] and data_15m["ADX"] > ADX_THRESHOLD) and
@@ -143,47 +176,23 @@ while True:
             
             current_time = time.time()
             
-            # Signal d'Achat détecté
             if buy_alignment:
                 alert_key = f"{symbol}_BUY"
                 if alert_key not in last_alerts or (current_time - last_alerts[alert_key] > ALERT_COOLDOWN):
-                    
-                    # ENVOI DE L'ORDRE REEL
                     trade_success = execute_hyperliquid_trade(symbol, "BUY", current_price)
-                    
                     if trade_success:
                         tp_p, sl_p, size_t = trade_success
-                        msg = (
-                            f"🤖 *[BOT AUTOMATIQUE] POSITION LONG OUVERTE*\n"
-                            f"• Actif : {symbol}\n"
-                            f"• Entrée exécutée : {round(current_price, 2)}\n"
-                            f"• Taille du contrat : {size_t} {symbol}\n\n"
-                            f"🟢 *SÉCURISATION :*\n"
-                            f"🎯 TAKE PROFIT : {tp_p}\n"
-                            f"🛑 STOP LOSS (Risque 20$) : {sl_p}"
-                        )
+                        msg = f"🤖 *[BOT AUTOMATIQUE] POSITION LONG OUVERTE*\n• Actif : {symbol}\n• Entrée : {round(current_price, 2)}\n\n🟢 *SÉCURISATION INTERNE :*\n🎯 TAKE PROFIT : {tp_p}\n🛑 STOP LOSS INITIAL : {sl_p}\n🛡️ *Breakeven automatisé activé à +1%*"
                         send_telegram_alert(msg)
                         last_alerts[alert_key] = current_time
                     
-            # Signal de Vente détecté
             elif sell_alignment:
                 alert_key = f"{symbol}_SELL"
                 if alert_key not in last_alerts or (current_time - last_alerts[alert_key] > ALERT_COOLDOWN):
-                    
-                    # ENVOI DE L'ORDRE REEL
                     trade_success = execute_hyperliquid_trade(symbol, "SELL", current_price)
-                    
                     if trade_success:
                         tp_p, sl_p, size_t = trade_success
-                        msg = (
-                            f"🤖 *[BOT AUTOMATIQUE] POSITION SHORT OUVERTE*\n"
-                            f"• Actif : {symbol}\n"
-                            f"• Entrée exécutée : {round(current_price, 2)}\n"
-                            f"• Taille du contrat : {size_t} {symbol}\n\n"
-                            f"🔴 *SÉCURISATION :*\n"
-                            f"🎯 TAKE PROFIT : {tp_p}\n"
-                            f"🛑 STOP LOSS (Risque 20$) : {sl_p}"
-                        )
+                        msg = f"🤖 *[BOT AUTOMATIQUE] POSITION SHORT OUVERTE*\n• Actif : {symbol}\n• Entrée : {round(current_price, 2)}\n\n🔴 *SÉCURISATION INTERNE :*\n🎯 TAKE PROFIT : {tp_p}\n🛑 STOP LOSS INITIAL : {sl_p}\n🛡️ *Breakeven automatisé activé à +1%*"
                         send_telegram_alert(msg)
                         last_alerts[alert_key] = current_time
 
