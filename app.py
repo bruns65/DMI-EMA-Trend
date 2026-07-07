@@ -36,26 +36,23 @@ else:
 adx_period = 14
 adx_threshold = 20
 
-# --- CALCULS MATHÉMATIQUES NATIFS (Pas besoin de pandas_ta) ---
-def compute_indicators(df):
+# Formule mathématique native pour le DMI et l'EMA
+def compute_dmi_and_ema(df, compute_ema=False):
     try:
-        # 1. Calcul de l'EMA 200 (Tendance de fond)
-        df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        if compute_ema:
+            df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
         
-        # 2. Calcul du DMI (DI+, DI-, ADX)
         df['plus_dm'] = df['High'].diff()
         df['minus_dm'] = df['Low'].diff(-1)
         
         df['plus_dm'] = np.where((df['plus_dm'] > df['minus_dm']) & (df['plus_dm'] > 0), df['plus_dm'], 0)
         df['minus_dm'] = np.where((df['minus_dm'] > df['plus_dm']) & (df['minus_dm'] > 0), df['minus_dm'], 0)
         
-        # True Range
         df['tr1'] = df['High'] - df['Low']
         df['tr2'] = abs(df['High'] - df['Close'].shift(1))
         df['tr3'] = abs(df['Low'] - df['Close'].shift(1))
         df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
         
-        # Lissage Wilder
         df['TR_smooth'] = df['TR'].ewm(alpha=1/adx_period, adjust=False).mean()
         df['DM_plus_smooth'] = df['plus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
         df['DM_minus_smooth'] = df['minus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
@@ -63,36 +60,36 @@ def compute_indicators(df):
         df['DI_plus'] = (df['DM_plus_smooth'] / df['TR_smooth']) * 100
         df['DI_minus'] = (df['DM_minus_smooth'] / df['TR_smooth']) * 100
         
-        # DX & ADX
         df['DX'] = (abs(df['DI_plus'] - df['DI_minus']) / (df['DI_plus'] + df['DI_minus'])) * 100
         df['ADX'] = df['DX'].ewm(alpha=1/adx_period, adjust=False).mean()
         
-        return {
+        res = {
             "close": df['Close'].iloc[-1],
-            "EMA_200": df['EMA_200'].iloc[-1],
             "DI+": round(df['DI_plus'].iloc[-1], 1),
             "DI-": round(df['DI_minus'].iloc[-1], 1),
             "ADX": round(df['ADX'].iloc[-1], 1)
         }
+        if compute_ema:
+            res["EMA_200"] = df['EMA_200'].iloc[-1]
+        return res
     except:
         return None
 
-def get_data_for_tf(ticker, tf, period):
-    try:
-        df = yf.Ticker(ticker).history(interval=tf, period=period)
-        if df.empty or len(df) < 201:
-            return None
-        return compute_indicators(df)
-    except:
-        return None
+# --- APPELS ALLÉGÉS POUR SÉCURISER L'API ---
+with st.spinner("Analyse des flux financiers..."):
+    # Graphique Macro 1H : Historique large pour l'EMA 200
+    df_1h_raw = yf.Ticker(ticker_symbol).history(interval="1h", period="3mo")
+    data_1h = compute_dmi_and_ema(df_1h_raw, compute_ema=True) if not df_1h_raw.empty else None
 
-# --- EXTRACTION ---
-with st.spinner("Analyse des flux mathématiques..."):
-    # On demande assez de données pour l'EMA 200 sur chaque unité de temps
-    data_1h = get_data_for_tf(ticker_symbol, "1h", "1mo") if asset_type == "Forex" else get_data_for_tf(ticker_symbol, "1h", "1mo")
-    data_15m = get_data_for_tf(ticker_symbol, "15m", "5d")
-    data_5m = get_data_for_tf(ticker_symbol, "5m", "5d")
+    # Graphique Intermédiaire 15m : Allégé à 2 jours
+    df_15m_raw = yf.Ticker(ticker_symbol).history(interval="15m", period="2d")
+    data_15m = compute_dmi_and_ema(df_15m_raw) if not df_15m_raw.empty else None
 
+    # Graphique Chirurgical 5m : Allégé à 1 jour (suffisant pour un DMI 14)
+    df_5m_raw = yf.Ticker(ticker_symbol).history(interval="5m", period="1d")
+    data_5m = compute_dmi_and_ema(df_5m_raw) if not df_5m_raw.empty else None
+
+# Affichage des résultats
 if data_1h and data_15m and data_5m:
     is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
     macro_status = "🟩 HAUSSIER (Prix > EMA200)" if is_macro_bull else "🟥 BAISSIER (Prix < EMA200)"
@@ -134,4 +131,4 @@ if data_1h and data_15m and data_5m:
     if st.button("🔄 Actualiser le flux"):
         st.rerun()
 else:
-    st.error("Yahoo Finance ne renvoie pas assez d'historique pour l'EMA 200 sur ce marché actuellement. Réessaie dans quelques instants.")
+    st.error("Problème temporaire avec Yahoo Finance. Si nous sommes le week-end, bascule sur l'onglet 'Crypto' car les devises Forex ne cotent pas.")
