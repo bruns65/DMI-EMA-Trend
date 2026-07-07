@@ -46,7 +46,7 @@ if asset_type == "Forex":
     fx_choice = st.selectbox("Paire Forex :", ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"])
     ticker_symbol = fx_choice
 else:
-    api_source = st.radio("Source Crypto :", ["Binance (Spot)", "Hyperliquid (Perps)"], horizontal=True)
+    api_source = st.radio("Source Crypto :", ["Hyperliquid (Perps)", "OKX (Spot/Perps)"], horizontal=True)
     crypto_choice = st.selectbox("Actif Crypto :", ["BTC", "ETH", "SOL"])
     ticker_symbol = crypto_choice
 
@@ -79,13 +79,22 @@ def get_forex_candles(pair, interval):
     except:
         return None
 
-def get_binance_candles(symbol, interval, limit=250):
+def get_okx_candles(symbol, interval, limit=250):
     try:
-        pair = f"{symbol.upper()}USDT"
-        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={interval}&limit={limit}"
+        # Correspondance des intervalles pour OKX
+        okx_intervals = {"5m": "5m", "15m": "15m", "1h": "1H"}
+        okx_inst = f"{symbol.upper()}-USDT"
+        
+        url = f"https://www.okx.com/api/v5/market/candles?instId={okx_inst}&bar={okx_intervals.get(interval, '1H')}&limit={limit}"
         res = requests.get(url, timeout=4).json()
-        df = pd.DataFrame(res, columns=['Time', 'Open', 'High', 'Low', 'Close', 'Volume', 'CloseTime', 'AssetVolume', 'Trades', 'TakerBuyBase', 'TakerBuyQuote', 'Ignore'])
-        df['High'], df['Low'], df['Close'] = df['High'].astype(float), df['Low'].astype(float), df['Close'].astype(float)
+        
+        # OKX renvoie du plus récent au plus ancien, on doit inverser
+        df = pd.DataFrame(res['data'])[::-1].reset_index(drop=True)
+        df.columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Vol', 'VolCcy', 'VolCcyQuote', 'State']
+        
+        df['High'] = df['High'].astype(float)
+        df['Low'] = df['Low'].astype(float)
+        df['Close'] = df['Close'].astype(float)
         return df
     except:
         return None
@@ -98,8 +107,11 @@ def get_hyperliquid_candles(symbol, interval, limit=250):
         duration_ms = limit * 60 * 1000 if interval == "5m" else limit * 15 * 60 * 1000 if interval == "15m" else limit * 60 * 60 * 1000
         payload = {"type": "candleSnapshot", "req": {"coin": symbol.upper(), "interval": hl_intervals.get(interval, "1h"), "startTime": now_ms - duration_ms}}
         res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=4).json()
+        
         df = pd.DataFrame(res)[::-1].reset_index(drop=True).rename(columns={'h': 'High', 'l': 'Low', 'c': 'Close'})
-        df['High'], df['Low'], df['Close'] = df['High'].astype(float), df['Low'].astype(float), df['Close'].astype(float)
+        df['High'] = df['High'].astype(float)
+        df['Low'] = df['Low'].astype(float)
+        df['Close'] = df['Close'].astype(float)
         return df
     except:
         return None
@@ -143,11 +155,11 @@ def compute_dmi_and_ema(df, compute_ema=False):
 
 # Récupération
 data_1h, data_15m, data_5m = None, None, None
-with st.spinner("Mise à jour des flux..."):
+with st.spinner("Synchronisation des flux temps réel..."):
     if asset_type == "Forex":
         df_1h, df_15m, df_5m = get_forex_candles(ticker_symbol, "1h"), get_forex_candles(ticker_symbol, "15m"), get_forex_candles(ticker_symbol, "5m")
     else:
-        src = get_binance_candles if api_source == "Binance (Spot)" else get_hyperliquid_candles
+        src = get_hyperliquid_candles if api_source == "Hyperliquid (Perps)" else get_okx_candles
         df_1h, df_15m, df_5m = src(ticker_symbol, "1h"), src(ticker_symbol, "15m"), src(ticker_symbol, "5m")
 
     if df_1h is not None and df_15m is not None and df_5m is not None:
@@ -155,7 +167,7 @@ with st.spinner("Mise à jour des flux..."):
         data_15m = compute_dmi_and_ema(df_15m)
         data_5m = compute_dmi_and_ema(df_5m)
 
-# Affichage des cartes et Logique d'Alerte Pure
+# Affichage des structures et alertes strictes
 if data_1h and data_15m and data_5m:
     is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
     macro_status = "🟩 HAUSSIER" if is_macro_bull else "🟥 BAISSIER"
@@ -176,12 +188,12 @@ if data_1h and data_15m and data_5m:
     perfect_sell_alignment = not is_macro_bull and sell_5m and sell_15m and sell_1h
     
     if perfect_buy_alignment:
-        msg = f"🚀 *TRIPLE ALIGNEMENT ACHAT* 🚀\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Les 3 UT (5m, 15m, 1H) sont haussières avec ADX > {adx_threshold} !"
+        msg = f"🚀 *TRIPLE ALIGNEMENT ACHAT* 🚀\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Haussière !"
         send_telegram_alert(msg)
         st.success("🔔 ALERTE TRIPLE ÉCRAN ENVOYÉE !")
         
     elif perfect_sell_alignment:
-        msg = f"💥 *TRIPLE ALIGNEMENT VENTE* 💥\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Les 3 UT (5m, 15m, 1H) sont baissières avec ADX > {adx_threshold} !"
+        msg = f"💥 *TRIPLE ALIGNEMENT VENTE* 💥\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Baissière !"
         send_telegram_alert(msg)
         st.success("🔔 ALERTE TRIPLE ÉCRAN ENVOYÉE !")
 
