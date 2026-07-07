@@ -39,10 +39,11 @@ adx_threshold = 20
 # Extraction propre de la Tendance de Fond (1H) avec EMA 200
 def get_macro_trend(ticker):
     try:
-        # On demande 1 mois de données en 1H, largement suffisant pour l'EMA 200
-        df_1h = yf.Ticker(ticker).history(interval="1h", period="1mo")
+        # Période passée à 3mo pour garantir plus de 200 bougies horaires
+        df_1h = yf.Ticker(ticker).history(interval="1h", period="3mo")
         if df_1h.empty or len(df_1h) < 200:
             return None, None
+            
         ema_200 = ta.ema(df_1h['Close'], length=200)
         dmi_1h = ta.adx(df_1h['High'], df_1h['Low'], df_1h['Close'], length=adx_period)
         
@@ -59,7 +60,6 @@ def get_macro_trend(ticker):
 # Extraction chirurgicale des petites UT (5m et 15m) pour le DMI pur
 def get_scalping_dmi(ticker, tf):
     try:
-        # Consommation minimale de données (5 jours suffisent amplement pour un DMI 14)
         df = yf.Ticker(ticker).history(interval=tf, period="5d")
         if df.empty or len(df) < adx_period:
             return None
@@ -79,7 +79,6 @@ with st.spinner("Calcul des structures de flux..."):
     data_5m = get_scalping_dmi(ticker_symbol, "5m")
 
 if macro_data and data_15m and data_5m:
-    # Validation du biais macro
     is_macro_bull = macro_data["close"] > macro_data["EMA_200"]
     macro_status = "🟩 HAUSSIER (Prix > EMA200)" if is_macro_bull else "🟥 BAISSIER (Prix < EMA200)"
     
@@ -87,7 +86,6 @@ if macro_data and data_15m and data_5m:
     st.write(f"Prix en direct : **{round(current_price, 5)}**")
     st.write("---")
     
-    # Association pour l'affichage ordonné
     tf_dashboard = [
         ("5 min (Signal)", data_5m),
         ("15 min (Intermédiaire)", data_15m),
@@ -97,7 +95,6 @@ if macro_data and data_15m and data_5m:
     for name, data in tf_dashboard:
         di_p, di_m, adx = data["DI+"], data["DI-"], data["ADX"]
         
-        # Logique stricte d'alignement des forces
         if di_p > di_m and adx > adx_threshold:
             signal_html = '<span class="buy-text">🚀 ACHAT ALIGNÉ</span>' if is_macro_bull else '<span class="buy-text">⚠️ ACHAT CONTRE-TENDANCE</span>'
         elif di_m > di_p and adx > adx_threshold:
