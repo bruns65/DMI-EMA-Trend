@@ -2,10 +2,11 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
+from openai import OpenAI
 
-st.set_page_config(page_title="FX & Crypto Flow MTF", page_icon="⚡", layout="centered")
+# Configuration de la page mobile
+st.set_page_config(page_title="FX & Crypto Flow", page_icon="⚡", layout="centered")
 
-# Style CSS Sombre pour Mobile
 st.markdown("""
     <style>
     .metric-card {
@@ -23,24 +24,26 @@ st.markdown("""
 
 st.title("⚡ FX & Crypto Flow")
 
-# Menu de sélection rapide pour le smartphone
+# Récupération de la clé API sécurisée dans tes Secrets Streamlit
+try:
+    api_key = st.secrets["OPENROUTER_API_KEY"]
+except Exception:
+    api_key = None
+
+# Sélection du marché
 asset_type = st.radio("Type de marché :", ["Forex", "Crypto"], horizontal=True)
 
 if asset_type == "Forex":
-    # Les tickers Yahoo Finance pour le Forex se terminent par =X
-    fx_choice = st.selectbox("Paire Forex :", ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "EURGBP=X"])
+    fx_choice = st.selectbox("Paire Forex :", ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X"])
     ticker_symbol = fx_choice
 else:
     crypto_choice = st.selectbox("Crypto :", ["BTC-USD", "ETH-USD", "SOL-USD"])
     ticker_symbol = crypto_choice
 
-# Configuration des indicateurs
 adx_period = 14
 ema_trend_period = 200
 adx_threshold = 20
 
-# Correspondance des unités de temps entre l'app et Yahoo Finance
-# (YFinance utilise '5m', '15m', '1h')
 tf_map = {
     "5 min (Signal)": "5m",
     "15 min (Intermédiaire)": "15m",
@@ -49,15 +52,14 @@ tf_map = {
 
 def fetch_yfinance_data(ticker, timeframe):
     try:
-        # Récupère assez de données pour l'EMA 200 selon l'unité de temps
         period = "5d" if timeframe in ["5m", "15m"] else "1mo"
         ticker_obj = yf.Ticker(ticker)
         df = ticker_obj.history(interval=timeframe, period=period)
         
-        if df.empty:
+        if df.empty or len(df) < ema_trend_period:
             return None
             
-        # Calcul des indicateurs
+        # Calcul strict des indicateurs (DMI + EMA)
         dmi = ta.adx(df['High'], df['Low'], df['Close'], length=adx_period)
         ema = ta.ema(df['Close'], length=ema_trend_period)
         
@@ -68,17 +70,17 @@ def fetch_yfinance_data(ticker, timeframe):
             "DI+": round(dmi[f"DMP_{adx_period}"].iloc[-1], 1),
             "DI-": round(dmi[f"DMN_{adx_period}"].iloc[-1], 1)
         }
-    except:
+    except Exception as e:
         return None
 
 # --- CALCULS ---
-with st.spinner("Analyse des flux en cours..."):
+with st.spinner("Analyse des flux mathématiques..."):
     data_1h = fetch_yfinance_data(ticker_symbol, "1h")
     data_15m = fetch_yfinance_data(ticker_symbol, "15m")
     data_5m = fetch_yfinance_data(ticker_symbol, "5m")
 
 if data_1h and data_15m and data_5m and data_1h["EMA"] is not None:
-    # 1. Tendance de Fond (EMA 200 sur le 1H)
+    # Tendance de Fond (EMA 200 sur le 1H)
     is_macro_bull = data_1h["close"] > data_1h["EMA"]
     macro_status = "🟩 HAUSSIER" if is_macro_bull else "🟥 BAISSIER"
     
@@ -86,12 +88,11 @@ if data_1h and data_15m and data_5m and data_1h["EMA"] is not None:
     st.write(f"Prix actuel : **{round(data_5m['close'], 5)}**")
     st.write("---")
     
-    # 2. Boucle d'affichage pour les cartes mobiles
+    # Rendu des blocs pour le mobile
     for name, tf_code in tf_map.items():
         data = data_5m if "5 min" in name else (data_15m if "15 min" in name else data_1h)
         di_p, di_m, adx = data["DI+"], data["DI-"], data["ADX"]
         
-        # Logique de signal
         if di_p > di_m and adx > adx_threshold:
             signal_html = '<span class="buy-text">🚀 ACHAT ALIGNÉ</span>' if is_macro_bull else '<span class="buy-text">⚠️ ACHAT CONTRE-TENDANCE</span>'
         elif di_m > di_p and adx > adx_threshold:
@@ -99,7 +100,6 @@ if data_1h and data_15m and data_5m and data_1h["EMA"] is not None:
         else:
             signal_html = '<span style="color: #888;">⏳ Neutre / Compression</span>'
             
-        # Code de la carte responsive
         st.markdown(f"""
             <div class="metric-card">
                 <div class="title-text">{name}</div>
@@ -117,4 +117,4 @@ if data_1h and data_15m and data_5m and data_1h["EMA"] is not None:
     if st.button("🔄 Rafraîchir les cours"):
         st.rerun()
 else:
-    st.error("Données indisponibles (Vérifie que les marchés Forex soient ouverts le week-end !)")
+    st.error("Données indisponibles (Vérifie que la bourse est ouverte si tu es sur le Forex, ou attends quelques secondes).")
