@@ -2,8 +2,8 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 
-# Configuration de l'affichage mobile
 st.set_page_config(page_title="FX & Crypto Flow", page_icon="⚡", layout="centered")
 
 st.markdown("""
@@ -36,7 +36,7 @@ else:
 adx_period = 14
 adx_threshold = 20
 
-# Formule mathématique native pour le DMI et l'EMA
+# Formule mathématique pour le DMI et l'EMA
 def compute_dmi_and_ema(df, compute_ema=False):
     try:
         if compute_ema:
@@ -75,72 +75,90 @@ def compute_dmi_and_ema(df, compute_ema=False):
     except:
         return None
 
-# --- APPELS AVEC TIMEOUT ANTI-BLOCAGE ---
-data_1h, data_15m, data_5m = None, None, None
+# Fonction de secours : Génère des données génériques réalistes pour éviter le blocage
+def generate_generic_data(base_price, size=250, compute_ema=False):
+    np.random.seed(int(time.time()) % 1000)
+    returns = np.random.normal(0, 0.001, size)
+    price_series = base_price * (1 + returns).cumprod()
+    
+    df = pd.DataFrame({
+        'Close': price_series,
+        'High': price_series * (1 + abs(np.random.normal(0, 0.0005, size))),
+        'Low': price_series * (1 - abs(np.random.normal(0, 0.0005, size)))
+    })
+    return compute_dmi_and_ema(df, compute_ema=compute_ema)
 
-with st.spinner("Extraction des flux en cours..."):
+# --- TENTATIVE D'EXTRACTION AVEC SÉCURITÉ GÉNÉRIQUE ---
+data_1h, data_15m, data_5m = None, None, None
+mode_secours = False
+
+with st.spinner("Analyse des flux..."):
     try:
-        # Sécurisation avec proxy=None et timeout pour éviter la charge infinie
         ticker_obj = yf.Ticker(ticker_symbol)
         
-        # 1H (3 mois)
-        df_1h_raw = ticker_obj.history(interval="1h", period="3mo", timeout=5)
-        if not df_1h_raw.empty:
-            data_1h = compute_dmi_and_ema(df_1h_raw, compute_ema=True)
-
-        # 15m (2 jours)
-        df_15m_raw = ticker_obj.history(interval="15m", period="2d", timeout=5)
-        if not df_15m_raw.empty:
-            data_15m = compute_dmi_and_ema(df_15m_raw)
-
-        # 5m (1 jour)
-        df_5m_raw = ticker_obj.history(interval="5m", period="1d", timeout=5)
-        if not df_5m_raw.empty:
-            data_5m = compute_dmi_and_ema(df_5m_raw)
-            
-    except Exception as e:
-        st.warning("Le serveur de données est un peu lent à répondre. Clique sur Actualiser.")
-
-# Affichage des résultats
-if data_1h and data_15m and data_5m:
-    is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
-    macro_status = "🟩 HAUSSIER (Prix > EMA200)" if is_macro_bull else "🟥 BAISSIER (Prix < EMA200)"
-    
-    st.subheader(f"Tendance Macro 1H : {macro_status}")
-    st.write(f"Prix en direct : **{round(data_5m['close'], 5)}**")
-    st.write("---")
-    
-    tf_dashboard = [
-        ("5 min (Signal)", data_5m),
-        ("15 min (Intermédiaire)", data_15m),
-        ("1H (Structure)", data_1h)
-    ]
-    
-    for name, data in tf_dashboard:
-        di_p, di_m, adx = data["DI+"], data["DI-"], data["ADX"]
+        df_1h_raw = ticker_obj.history(interval="1h", period="3mo", timeout=3)
+        df_15m_raw = ticker_obj.history(interval="15m", period="2d", timeout=3)
+        df_5m_raw = ticker_obj.history(interval="5m", period="1d", timeout=3)
         
-        if di_p > di_m and adx > adx_threshold:
-            signal_html = '<span class="buy-text">🚀 ACHAT ALIGNÉ</span>' if is_macro_bull else '<span class="buy-text">⚠️ ACHAT CONTRE-TENDANCE</span>'
-        elif di_m > di_p and adx > adx_threshold:
-            signal_html = '<span class="sell-text">💥 VENTE ALIGNÉE</span>' if not is_macro_bull else '<span class="sell-text">⚠️ VENTE CONTRE-TENDANCE</span>'
+        if not df_1h_raw.empty and not df_15m_raw.empty and not df_5m_raw.empty:
+            data_1h = compute_dmi_and_ema(df_1h_raw, compute_ema=True)
+            data_15m = compute_dmi_and_ema(df_15m_raw)
+            data_5m = compute_dmi_and_ema(df_5m_raw)
         else:
-            signal_html = '<span style="color: #888;">⏳ Neutre / Compression</span>'
-            
-        st.markdown(f"""
-            <div class="metric-card">
-                <div class="title-text">{name}</div>
-                <table style="width:100%; border:none; margin-top:5px; color: #e0e0e0;">
-                    <tr>
-                        <td><b>DI+ :</b> {di_p}</td>
-                        <td><b>DI- :</b> {di_m}</td>
-                        <td><b>ADX :</b> {adx}</td>
-                    </tr>
-                </table>
-                <div style="margin-top: 8px;">{signal_html}</div>
-            </div>
-        """, unsafe_allow_html=True)
-else:
-    st.error("Données incomplètes. Clique sur le bouton ci-dessous pour forcer la reconnexion à Yahoo Finance.")
+            mode_secours = True
+    except:
+        mode_secours = True
 
-if st.button("🔄 Actualiser le flux"):
+    # Si l'API Yahoo bloque, on injecte immédiatement la version générique
+    if mode_secours:
+        base_p = 1.08500 if asset_type == "Forex" else 60000.0
+        data_1h = generate_generic_data(base_p, size=250, compute_ema=True)
+        data_15m = generate_generic_data(base_p, size=50)
+        data_5m = generate_generic_data(base_p, size=30)
+
+# Affichage du statut de la connexion
+if mode_secours:
+    st.caption("⚠️ Mode Flux Générique Activé (Yahoo Finance saturé - Données Simulées)")
+else:
+    st.caption("🟩 Flux Direct Actif (Yahoo Finance)")
+
+# Affichage des structures de cartes
+is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
+macro_status = "🟩 HAUSSIER" if is_macro_bull else "🟥 BAISSIER"
+
+st.subheader(f"Tendance Macro 1H : {macro_status}")
+st.write(f"Prix calculé : **{round(data_5m['close'], 5)}**")
+st.write("---")
+
+tf_dashboard = [
+    ("5 min (Signal)", data_5m),
+    ("15 min (Intermédiaire)", data_15m),
+    ("1H (Structure)", data_1h)
+]
+
+for name, data in tf_dashboard:
+    di_p, di_m, adx = data["DI+"], data["DI-"], data["ADX"]
+    
+    if di_p > di_m and adx > adx_threshold:
+        signal_html = '<span class="buy-text">🚀 ACHAT ALIGNÉ</span>' if is_macro_bull else '<span class="buy-text">⚠️ ACHAT CONTRE-TENDANCE</span>'
+    elif di_m > di_p and adx > adx_threshold:
+        signal_html = '<span class="sell-text">💥 VENTE ALIGNÉE</span>' if not is_macro_bull else '<span class="sell-text">⚠️ VENTE CONTRE-TENDANCE</span>'
+    else:
+        signal_html = '<span style="color: #888;">⏳ Neutre / Compression</span>'
+        
+    st.markdown(f"""
+        <div class="metric-card">
+            <div class="title-text">{name}</div>
+            <table style="width:100%; border:none; margin-top:5px; color: #e0e0e0;">
+                <tr>
+                    <td><b>DI+ :</b> {di_p}</td>
+                    <td><b>DI- :</b> {di_m}</td>
+                    <td><b>ADX :</b> {adx}</td>
+                </tr>
+            </table>
+            <div style="margin-top: 8px;">{signal_html}</div>
+        </div>
+    """, unsafe_allow_html=True)
+
+if st.button("🔄 Tenter d'actualiser le flux"):
     st.rerun()
