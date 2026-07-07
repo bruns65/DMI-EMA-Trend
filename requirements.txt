@@ -1,3 +1,6 @@
 pandas==2.2.2
 numpy
 requests
+streamlit
+hyperliquid-python-sdk
+eth-account
