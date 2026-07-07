@@ -46,7 +46,7 @@ if asset_type == "Forex":
     fx_choice = st.selectbox("Paire Forex :", ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"])
     ticker_symbol = fx_choice
 else:
-    api_source = st.radio("Source Crypto :", ["dYdX (Perps)", "OKX (Spot/Perps)"], horizontal=True)
+    api_source = st.radio("Source Crypto :", ["Gate.io (Spot)", "OKX (Spot/Perps)"], horizontal=True)
     crypto_choice = st.selectbox("Actif Crypto :", ["BTC", "ETH", "SOL"])
     ticker_symbol = crypto_choice
 
@@ -95,18 +95,18 @@ def get_okx_candles(symbol, interval, limit=250):
     except:
         return None
 
-def get_dydx_candles(symbol, interval, limit=100):
+def get_gate_candles(symbol, interval, limit=250):
     try:
-        # Formattage de l'intervalle pour dYdX (5MIN, 15MIN, 1HOUR)
-        dydx_intervals = {"5m": "5MIN", "15m": "15MIN", "1h": "1HOUR"}
-        market_id = f"{symbol.upper()}-USD"
+        # Correspondance des intervalles pour Gate.io (5m, 15m, 1h)
+        gate_intervals = {"5m": "5m", "15m": "15m", "1h": "1h"}
+        currency_pair = f"{symbol.upper()}_USDT"
         
-        url = f"https://api.dydx.exchange/v4/candles/perpetualMarkets/{market_id}?resolution={dydx_intervals.get(interval, '1HOUR')}&limit={limit}"
+        url = f"https://api.gateio.ws/api/v4/flash_swap/candles?pair={currency_pair}&interval={gate_intervals.get(interval, '1h')}&limit={limit}"
         res = requests.get(url, timeout=4).json()
         
-        # dYdX renvoie du plus récent au plus ancien, on inverse
-        df = pd.DataFrame(res['candles'])[::-1].reset_index(drop=True)
-        df = df.rename(columns={'high': 'High', 'low': 'Low', 'close': 'Close'})
+        # Structure de retour Gate.io : [timestamp, close, high, low, open]
+        df = pd.DataFrame(res, columns=['Time', 'Close', 'High', 'Low', 'Open'])
+        
         df['High'] = df['High'].astype(float)
         df['Low'] = df['Low'].astype(float)
         df['Close'] = df['Close'].astype(float)
@@ -153,11 +153,11 @@ def compute_dmi_and_ema(df, compute_ema=False):
 
 # Récupération
 data_1h, data_15m, data_5m = None, None, None
-with st.spinner("Synchronisation des flux temps réel..."):
+with st.spinner("Sychronisation des flux temps réel..."):
     if asset_type == "Forex":
         df_1h, df_15m, df_5m = get_forex_candles(ticker_symbol, "1h"), get_forex_candles(ticker_symbol, "15m"), get_forex_candles(ticker_symbol, "5m")
     else:
-        src = get_dydx_candles if api_source == "dYdX (Perps)" else get_okx_candles
+        src = get_gate_candles if api_source == "Gate.io (Spot)" else get_okx_candles
         df_1h, df_15m, df_5m = src(ticker_symbol, "1h"), src(ticker_symbol, "15m"), src(ticker_symbol, "5m")
 
     if df_1h is not None and df_15m is not None and df_5m is not None:
@@ -186,12 +186,12 @@ if data_1h and data_15m and data_5m:
     perfect_sell_alignment = not is_macro_bull and sell_5m and sell_15m and sell_1h
     
     if perfect_buy_alignment:
-        msg = f"🚀 *TRIPLE ALIGNEMENT ACHAT* 🚀\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Haussière (dYdX/OKX) !"
+        msg = f"🚀 *TRIPLE ALIGNEMENT ACHAT* 🚀\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Haussière (Gate/OKX) !"
         send_telegram_alert(msg)
         st.success("🔔 ALERTE TRIPLE ÉCRAN ENVOYÉE !")
         
     elif perfect_sell_alignment:
-        msg = f"💥 *TRIPLE ALIGNEMENT VENTE* 💥\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Baissière (dYdX/OKX) !"
+        msg = f"💥 *TRIPLE ALIGNEMENT VENTE* 💥\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Baissière (Gate/OKX) !"
         send_telegram_alert(msg)
         st.success("🔔 ALERTE TRIPLE ÉCRAN ENVOYÉE !")
 
