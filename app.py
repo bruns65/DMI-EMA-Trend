@@ -1,10 +1,9 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
-import time
+import requests
 
-st.set_page_config(page_title="FX & Crypto Flow", page_icon="⚡", layout="centered")
+st.set_page_config(page_title="Crypto Flow Pro", page_icon="⚡", layout="centered")
 
 st.markdown("""
     <style>
@@ -21,22 +20,72 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.title("⚡ FX & Crypto Flow")
+st.title("⚡ Crypto Flow Direct (API)")
 
-# Sélection du marché
-asset_type = st.radio("Type de marché :", ["Forex", "Crypto"], horizontal=True)
-
-if asset_type == "Forex":
-    fx_choice = st.selectbox("Paire Forex :", ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X"])
-    ticker_symbol = fx_choice
-else:
-    crypto_choice = st.selectbox("Crypto :", ["BTC-USD", "ETH-USD", "SOL-USD"])
-    ticker_symbol = crypto_choice
+# Sélection de la source et de l'actif
+api_source = st.radio("Source de flux :", ["Hyperliquid (Perps)", "Binance (Spot)"], horizontal=True)
+crypto_choice = st.selectbox("Actif :", ["BTC", "ETH", "SOL"])
 
 adx_period = 14
 adx_threshold = 20
 
-# Formule mathématique pour le DMI et l'EMA
+# --- EXTRACTION DIRECTE VIA API BINANCE (Sans yfinance) ---
+def get_binance_candles(symbol, interval, limit=250):
+    try:
+        pair = f"{symbol}USDT"
+        url = f"https://api.binance.com/api/v3/klines?symbol={pair}&interval={interval}&limit={limit}"
+        res = requests.get(url, timeout=4).json()
+        
+        # Formatage en DataFrame propre
+        df = pd.DataFrame(res, columns=[
+            'Time', 'Open', 'High', 'Low', 'Close', 'Volume', 
+            'CloseTime', 'AssetVolume', 'Trades', 'TakerBuyBase', 'TakerBuyQuote', 'Ignore'
+        ])
+        df['High'] = df['High'].astype(float)
+        df['Low'] = df['Low'].astype(float)
+        df['Close'] = df['Close'].astype(float)
+        return df
+    except:
+        return None
+
+# --- EXTRACTION DIRECTE VIA API HYPERLIQUID ---
+def get_hyperliquid_candles(symbol, interval, limit=250):
+    try:
+        # Conversion des intervalles pour Hyperliquid
+        hl_intervals = {"5m": "5m", "15m": "15m", "1h": "1h"}
+        hl_interval = hl_intervals.get(interval, "1h")
+        
+        url = "https://api.hyperliquid.xyz/info"
+        headers = {"Content-Type": "application/json"}
+        
+        # Calcul du timestamp de départ pour avoir assez de bougies
+        now_ms = int(time.time() * 1000) if 'time' in globals() else 1719792000000
+        # Estimation large du recul nécessaire selon l'UT
+        duration_ms = limit * 60 * 1000 if interval == "5m" else limit * 15 * 60 * 1000 if interval == "15m" else limit * 60 * 60 * 1000
+        start_time = now_ms - duration_ms
+
+        payload = {
+            "type": "candleSnapshot",
+            "req": {
+                "coin": symbol,
+                "interval": hl_interval,
+                "startTime": start_time
+            }
+        }
+        
+        res = requests.post(url, json=payload, headers=headers, timeout=4).json()
+        
+        # Inversion car HL renvoie du plus récent au plus ancien
+        df = pd.DataFrame(res)[::-1].reset_index(drop=True)
+        df = df.rename(columns={'h': 'High', 'l': 'Low', 'c': 'Close'})
+        df['High'] = df['High'].astype(float)
+        df['Low'] = df['Low'].astype(float)
+        df['Close'] = df['Close'].astype(float)
+        return df
+    except:
+        return None
+
+# --- INDICATEURS MATHÉMATIQUES ---
 def compute_dmi_and_ema(df, compute_ema=False):
     try:
         if compute_ema:
@@ -75,83 +124,66 @@ def compute_dmi_and_ema(df, compute_ema=False):
     except:
         return None
 
-def generate_generic_data(base_price, size=250, compute_ema=False):
-    np.random.seed(int(time.time()) % 1000)
-    returns = np.random.normal(0, 0.001, size)
-    price_series = base_price * (1 + returns).cumprod()
-    df = pd.DataFrame({
-        'Close': price_series,
-        'High': price_series * (1 + abs(np.random.normal(0, 0.0005, size))),
-        'Low': price_series * (1 - abs(np.random.normal(0, 0.0005, size)))
-    })
-    return compute_dmi_and_ema(df, compute_ema=compute_ema)
-
+# --- CHARGEMENT ---
 data_1h, data_15m, data_5m = None, None, None
-mode_secours = False
 
-with st.spinner("Analyse des structures de flux..."):
-    try:
-        ticker_obj = yf.Ticker(ticker_symbol)
-        df_1h_raw = ticker_obj.history(interval="1h", period="3mo", timeout=3)
-        df_15m_raw = ticker_obj.history(interval="15m", period="2d", timeout=3)
-        df_5m_raw = ticker_obj.history(interval="5m", period="1d", timeout=3)
-        
-        if not df_1h_raw.empty and not df_15m_raw.empty and not df_5m_raw.empty:
-            data_1h = compute_dmi_and_ema(df_1h_raw, compute_ema=True)
-            data_15m = compute_dmi_and_ema(df_15m_raw)
-            data_5m = compute_dmi_and_ema(df_5m_raw)
-        else:
-            mode_secours = True
-    except:
-        mode_secours = True
-
-    if mode_secours:
-        base_p = 1.08500 if asset_type == "Forex" else 60000.0
-        data_1h = generate_generic_data(base_p, size=250, compute_ema=True)
-        data_15m = generate_generic_data(base_p, size=50)
-        data_5m = generate_generic_data(base_p, size=30)
-
-if mode_secours:
-    st.caption("⚠️ Mode Flux Générique Activé (Données Simulées)")
-else:
-    st.caption("🟩 Flux Direct Actif (Yahoo Finance)")
-
-is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
-macro_status = "🟩 HAUSSIER (Prix > EMA200)" if is_macro_bull else "🟥 BAISSIER (Prix < EMA200)"
-
-st.subheader(f"Tendance Macro 1H : {macro_status}")
-st.write(f"Prix calculé : **{round(data_5m['close'], 5)}**")
-st.write("---")
-
-tf_dashboard = [
-    ("5 min (Signal)", data_5m),
-    ("15 min (Intermédiaire)", data_15m),
-    ("1H (Structure)", data_1h)
-]
-
-for name, data in tf_dashboard:
-    di_p, di_m, adx = data["DI+"], data["DI-"], data["ADX"]
-    
-    if di_p > di_m and adx > adx_threshold:
-        signal_html = '<span class="buy-text">🚀 ACHAT ALIGNÉ</span>' if is_macro_bull else '<span class="buy-text">⚠️ ACHAT CONTRE-TENDANCE</span>'
-    elif di_m > di_p and adx > adx_threshold:
-        signal_html = '<span class="sell-text">💥 VENTE ALIGNÉE</span>' if not is_macro_bull else '<span class="sell-text">⚠️ VENTE CONTRE-TENDANCE</span>'
+with st.spinner("Connexion directe aux carnets d'ordres..."):
+    if api_source == "Binance (Spot)":
+        df_1h = get_binance_candles(crypto_choice, "1h", limit=250)
+        df_15m = get_binance_candles(crypto_choice, "15m", limit=50)
+        df_5m = get_binance_candles(crypto_choice, "5m", limit=30)
     else:
-        signal_html = '<span style="color: #888;">⏳ Neutre / Compression</span>'
-        
-    st.markdown(f"""
-        <div class="metric-card">
-            <div class="title-text">{name}</div>
-            <table style="width:100%; border:none; margin-top:5px; color: #e0e0e0;">
-                <tr>
-                    <td><b>DI+ :</b> {di_p}</td>
-                    <td><b>DI- :</b> {di_m}</td>
-                    <td><b>ADX :</b> {adx}</td>
-                </tr>
-            </table>
-            <div style="margin-top: 8px;">{signal_html}</div>
-        </div>
-    """, unsafe_allow_html=True)
+        df_1h = get_hyperliquid_candles(crypto_choice, "1h", limit=250)
+        df_15m = get_hyperliquid_candles(crypto_choice, "15m", limit=50)
+        df_5m = get_hyperliquid_candles(crypto_choice, "5m", limit=30)
 
-if st.button("🔄 Actualiser"):
+    if df_1h is not None and df_15m is not None and df_5m is not None:
+        data_1h = compute_dmi_and_ema(df_1h, compute_ema=True)
+        data_15m = compute_dmi_and_ema(df_15m)
+        data_5m = compute_dmi_and_ema(df_5m)
+
+# --- AFFICHAGE ---
+if data_1h and data_15m and data_5m:
+    st.caption(f"🟩 Connecté en direct à l'API officielle de {api_source}")
+    
+    is_macro_bull = data_1h["close"] > data_1h["EMA_200"]
+    macro_status = "🟩 HAUSSIER" if is_macro_bull else "🟥 BAISSIER"
+    
+    st.subheader(f"Tendance Macro 1H : {macro_status}")
+    st.write(f"Prix {crypto_choice} en temps réel : **{round(data_5m['close'], 2)} $**")
+    st.write("---")
+    
+    tf_dashboard = [
+        ("5 min (Signal)", data_5m),
+        ("15 min (Intermédiaire)", data_15m),
+        ("1H (Structure)", data_1h)
+    ]
+    
+    for name, data in tf_dashboard:
+        di_p, di_m, adx = data["DI+"], data["DI-"], data["ADX"]
+        
+        if di_p > di_m and adx > adx_threshold:
+            signal_html = '<span class="buy-text">🚀 ACHAT ALIGNÉ</span>' if is_macro_bull else '<span class="buy-text">⚠️ ACHAT CONTRE-TENDANCE</span>'
+        elif di_m > di_p and adx > adx_threshold:
+            signal_html = '<span class="sell-text">💥 VENTE ALIGNÉE</span>' if not is_macro_bull else '<span class="sell-text">⚠️ VENTE CONTRE-TENDANCE</span>'
+        else:
+            signal_html = '<span style="color: #888;">⏳ Neutre / Compression</span>'
+            
+        st.markdown(f"""
+            <div class="metric-card">
+                <div class="title-text">{name}</div>
+                <table style="width:100%; border:none; margin-top:5px; color: #e0e0e0;">
+                    <tr>
+                        <td><b>DI+ :</b> {di_p}</td>
+                        <td><b>DI- :</b> {di_m}</td>
+                        <td><b>ADX :</b> {adx}</td>
+                    </tr>
+                </table>
+                <div style="margin-top: 8px;">{signal_html}</div>
+            </div>
+        """, unsafe_allow_html=True)
+else:
+    st.error("Impossible de joindre l'API d'échange. Vérifie ton réseau.")
+
+if st.button("🔄 Rafraîchir les cours"):
     st.rerun()
