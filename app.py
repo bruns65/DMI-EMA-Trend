@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
-from services import get_forex_candles, get_okx_candles, get_bybit_candles, compute_dmi_and_ema
+import time
+from services import get_forex_candles, get_okx_candles, get_coinbase_candles, compute_dmi_and_ema
 
 st.set_page_config(page_title="FX & Crypto Flow Pro", page_icon="⚡", layout="centered")
 
@@ -29,6 +30,10 @@ def send_telegram_alert(message):
     except:
         pass
 
+# --- GESTION DU RAFRAÎCHISSEMENT AUTO EN ARRIÈRE-PLAN ---
+st.sidebar.header("🔄 Automatisation")
+auto_refresh = st.sidebar.toggle("Rafraîchissement Auto (30s)", value=True)
+
 # Sélection du Marché
 asset_type = st.radio("Type de marché :", ["Crypto", "Forex"], horizontal=True)
 
@@ -45,7 +50,7 @@ if asset_type == "Forex":
     fx_choice = st.selectbox("Paire Forex :", ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"])
     ticker_symbol = fx_choice
 else:
-    api_source = st.radio("Source Crypto :", ["Bybit (Spot)", "OKX (Spot/Perps)"], horizontal=True)
+    api_source = st.radio("Source Crypto :", ["Coinbase (Spot)", "OKX (Spot/Perps)"], horizontal=True)
     crypto_choice = st.selectbox("Actif Crypto :", ["BTC", "ETH", "SOL"])
     ticker_symbol = crypto_choice
 
@@ -60,7 +65,7 @@ with st.spinner("Synchronisation des flux..."):
         df_15m = get_forex_candles(ticker_symbol)
         df_5m = get_forex_candles(ticker_symbol)
     else:
-        src = get_bybit_candles if api_source == "Bybit (Spot)" else get_okx_candles
+        src = get_coinbase_candles if api_source == "Coinbase (Spot)" else get_okx_candles
         df_1h = src(ticker_symbol, "1h")
         df_15m = src(ticker_symbol, "15m")
         df_5m = src(ticker_symbol, "5m")
@@ -77,6 +82,9 @@ if data_1h and data_15m and data_5m:
     
     st.subheader(f"Tendance Macro 1H : {macro_status}")
     st.write(f"Prix actuel : **{round(current_price, 5 if asset_type == 'Forex' else 2)}**")
+    
+    # Horodatage de la dernière mise à jour pour le suivi sur ton smartphone
+    st.caption(f"Dernière mise à jour du flux : {time.strftime('%H:%M:%S')}")
     st.write("---")
     
     buy_alignment = (data_5m["DI+"] > data_5m["DI-"] and data_5m["ADX"] > adx_threshold) and (data_15m["DI+"] > data_15m["DI-"] and data_15m["ADX"] > adx_threshold) and (data_1h["DI+"] > data_1h["DI-"] and data_1h["ADX"] > adx_threshold) and is_macro_bull
@@ -136,5 +144,11 @@ if data_1h and data_15m and data_5m:
 else:
     st.info("Sélectionne une source pour lancer l'analyse du flux.")
 
-if st.button("🔄 Actualiser les structures"):
+# Bouton d'actualisation manuelle traditionnel
+if st.button("🔄 Actualiser manuellement"):
+    st.rerun()
+
+# --- BLOC D'INJECTION POUR LE REFRESH EN ARRIÈRE-PLAN (30 SECONDES) ---
+if auto_refresh:
+    time.sleep(30)
     st.rerun()
