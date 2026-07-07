@@ -36,7 +36,7 @@ else:
 adx_period = 14
 adx_threshold = 20
 
-# Formule mathématique native pour le DMI et l'EMA (Remplace pandas_ta)
+# Formule mathématique native pour le DMI et l'EMA
 def compute_dmi_and_ema(df, compute_ema=False):
     try:
         if compute_ema:
@@ -75,19 +75,31 @@ def compute_dmi_and_ema(df, compute_ema=False):
     except:
         return None
 
-# --- APPELS ALLÉGÉS ---
-with st.spinner("Analyse des flux financiers..."):
-    # Graphique Macro 1H : Recul à 3 mois pour sécuriser l'EMA 200
-    df_1h_raw = yf.Ticker(ticker_symbol).history(interval="1h", period="3mo")
-    data_1h = compute_dmi_and_ema(df_1h_raw, compute_ema=True) if not df_1h_raw.empty else None
+# --- APPELS AVEC TIMEOUT ANTI-BLOCAGE ---
+data_1h, data_15m, data_5m = None, None, None
 
-    # Graphique Intermédiaire 15m
-    df_15m_raw = yf.Ticker(ticker_symbol).history(interval="15m", period="2d")
-    data_15m = compute_dmi_and_ema(df_15m_raw) if not df_15m_raw.empty else None
+with st.spinner("Extraction des flux en cours..."):
+    try:
+        # Sécurisation avec proxy=None et timeout pour éviter la charge infinie
+        ticker_obj = yf.Ticker(ticker_symbol)
+        
+        # 1H (3 mois)
+        df_1h_raw = ticker_obj.history(interval="1h", period="3mo", timeout=5)
+        if not df_1h_raw.empty:
+            data_1h = compute_dmi_and_ema(df_1h_raw, compute_ema=True)
 
-    # Graphique Chirurgical 5m
-    df_5m_raw = yf.Ticker(ticker_symbol).history(interval="5m", period="1d")
-    data_5m = compute_dmi_and_ema(df_5m_raw) if not df_5m_raw.empty else None
+        # 15m (2 jours)
+        df_15m_raw = ticker_obj.history(interval="15m", period="2d", timeout=5)
+        if not df_15m_raw.empty:
+            data_15m = compute_dmi_and_ema(df_15m_raw)
+
+        # 5m (1 jour)
+        df_5m_raw = ticker_obj.history(interval="5m", period="1d", timeout=5)
+        if not df_5m_raw.empty:
+            data_5m = compute_dmi_and_ema(df_5m_raw)
+            
+    except Exception as e:
+        st.warning("Le serveur de données est un peu lent à répondre. Clique sur Actualiser.")
 
 # Affichage des résultats
 if data_1h and data_15m and data_5m:
@@ -127,8 +139,8 @@ if data_1h and data_15m and data_5m:
                 <div style="margin-top: 8px;">{signal_html}</div>
             </div>
         """, unsafe_allow_html=True)
-        
-    if st.button("🔄 Actualiser le flux"):
-        st.rerun()
 else:
-    st.error("Problème temporaire de flux. Si nous sommes le week-end, bascule bien sur 'Crypto' car le Forex est fermé.")
+    st.error("Données incomplètes. Clique sur le bouton ci-dessous pour forcer la reconnexion à Yahoo Finance.")
+
+if st.button("🔄 Actualiser le flux"):
+    st.rerun()
