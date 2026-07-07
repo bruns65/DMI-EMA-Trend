@@ -39,14 +39,19 @@ adx_threshold = 20
 # Extraction propre de la Tendance de Fond (1H) avec EMA 200
 def get_macro_trend(ticker):
     try:
-        # Période passée à 3mo pour garantir plus de 200 bougies horaires
         df_1h = yf.Ticker(ticker).history(interval="1h", period="3mo")
         if df_1h.empty or len(df_1h) < 200:
-            return None, None
+            return {"error": f"Historique insuffisant (1H): {len(df_1h)} bougies récupérées."}, None
             
+        # Nettoyage des valeurs manquantes pour éviter le crash de pandas_ta
+        df_1h = df_1h.dropna(subset=['High', 'Low', 'Close'])
+        
         ema_200 = ta.ema(df_1h['Close'], length=200)
         dmi_1h = ta.adx(df_1h['High'], df_1h['Low'], df_1h['Close'], length=adx_period)
         
+        if dmi_1h is None or ema_200 is None:
+            return {"error": "Calcul des indicateurs 1H impossible."}, None
+            
         return {
             "close": df_1h['Close'].iloc[-1],
             "EMA_200": ema_200.iloc[-1],
@@ -54,23 +59,29 @@ def get_macro_trend(ticker):
             "DI-": round(dmi_1h[f"DMN_{adx_period}"].iloc[-1], 1),
             "ADX": round(dmi_1h[f"ADX_{adx_period}"].iloc[-1], 1)
         }, df_1h['Close'].iloc[-1]
-    except:
-        return None, None
+    except Exception as e:
+        return {"error": f"Exception Macro 1H : {str(e)}"}, None
 
 # Extraction chirurgicale des petites UT (5m et 15m) pour le DMI pur
 def get_scalping_dmi(ticker, tf):
     try:
         df = yf.Ticker(ticker).history(interval=tf, period="5d")
         if df.empty or len(df) < adx_period:
-            return None
+            return {"error": f"Historique insuffisant ({tf})."}
+            
+        df = df.dropna(subset=['High', 'Low', 'Close'])
         dmi = ta.adx(df['High'], df['Low'], df['Close'], length=adx_period)
+        
+        if dmi is None:
+            return {"error": f"Calcul DMI ({tf}) impossible."}
+            
         return {
             "DI+": round(dmi[f"DMP_{adx_period}"].iloc[-1], 1),
             "DI-": round(dmi[f"DMN_{adx_period}"].iloc[-1], 1),
             "ADX": round(dmi[f"ADX_{adx_period}"].iloc[-1], 1)
         }
-    except:
-        return None
+    except Exception as e:
+        return {"error": f"Exception DMI {tf} : {str(e)}"}
 
 # --- CRÉATION DE L'INTERFACE EN DIRECT ---
 with st.spinner("Calcul des structures de flux..."):
@@ -78,7 +89,14 @@ with st.spinner("Calcul des structures de flux..."):
     data_15m = get_scalping_dmi(ticker_symbol, "15m")
     data_5m = get_scalping_dmi(ticker_symbol, "5m")
 
-if macro_data and data_15m and data_5m:
+# Vérification s'il y a des erreurs de flux
+if macro_data and "error" in macro_data:
+    st.error(macro_data["error"])
+elif data_15m and "error" in data_15m:
+    st.error(data_15m["error"])
+elif data_5m and "error" in data_5m:
+    st.error(data_5m["error"])
+elif macro_data and data_15m and data_5m:
     is_macro_bull = macro_data["close"] > macro_data["EMA_200"]
     macro_status = "🟩 HAUSSIER (Prix > EMA200)" if is_macro_bull else "🟥 BAISSIER (Prix < EMA200)"
     
@@ -119,4 +137,4 @@ if macro_data and data_15m and data_5m:
     if st.button("🔄 Actualiser le flux"):
         st.rerun()
 else:
-    st.error("Calcul impossible. Si nous sommes le week-end, assure-toi de sélectionner 'Crypto' car les marchés Forex sont fermés.")
+    st.error("Une erreur inconnue empêche le chargement.")
