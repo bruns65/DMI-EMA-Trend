@@ -46,7 +46,7 @@ if asset_type == "Forex":
     fx_choice = st.selectbox("Paire Forex :", ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD"])
     ticker_symbol = fx_choice
 else:
-    api_source = st.radio("Source Crypto :", ["Hyperliquid (Perps)", "OKX (Spot/Perps)"], horizontal=True)
+    api_source = st.radio("Source Crypto :", ["dYdX (Perps)", "OKX (Spot/Perps)"], horizontal=True)
     crypto_choice = st.selectbox("Actif Crypto :", ["BTC", "ETH", "SOL"])
     ticker_symbol = crypto_choice
 
@@ -81,17 +81,13 @@ def get_forex_candles(pair, interval):
 
 def get_okx_candles(symbol, interval, limit=250):
     try:
-        # Correspondance des intervalles pour OKX
         okx_intervals = {"5m": "5m", "15m": "15m", "1h": "1H"}
         okx_inst = f"{symbol.upper()}-USDT"
-        
         url = f"https://www.okx.com/api/v5/market/candles?instId={okx_inst}&bar={okx_intervals.get(interval, '1H')}&limit={limit}"
         res = requests.get(url, timeout=4).json()
         
-        # OKX renvoie du plus récent au plus ancien, on doit inverser
         df = pd.DataFrame(res['data'])[::-1].reset_index(drop=True)
         df.columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Vol', 'VolCcy', 'VolCcyQuote', 'State']
-        
         df['High'] = df['High'].astype(float)
         df['Low'] = df['Low'].astype(float)
         df['Close'] = df['Close'].astype(float)
@@ -99,16 +95,18 @@ def get_okx_candles(symbol, interval, limit=250):
     except:
         return None
 
-def get_hyperliquid_candles(symbol, interval, limit=250):
+def get_dydx_candles(symbol, interval, limit=100):
     try:
-        hl_intervals = {"5m": "5m", "15m": "15m", "1h": "1h"}
-        url = "https://api.hyperliquid.xyz/info"
-        now_ms = int(time.time() * 1000)
-        duration_ms = limit * 60 * 1000 if interval == "5m" else limit * 15 * 60 * 1000 if interval == "15m" else limit * 60 * 60 * 1000
-        payload = {"type": "candleSnapshot", "req": {"coin": symbol.upper(), "interval": hl_intervals.get(interval, "1h"), "startTime": now_ms - duration_ms}}
-        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=4).json()
+        # Formattage de l'intervalle pour dYdX (5MIN, 15MIN, 1HOUR)
+        dydx_intervals = {"5m": "5MIN", "15m": "15MIN", "1h": "1HOUR"}
+        market_id = f"{symbol.upper()}-USD"
         
-        df = pd.DataFrame(res)[::-1].reset_index(drop=True).rename(columns={'h': 'High', 'l': 'Low', 'c': 'Close'})
+        url = f"https://api.dydx.exchange/v4/candles/perpetualMarkets/{market_id}?resolution={dydx_intervals.get(interval, '1HOUR')}&limit={limit}"
+        res = requests.get(url, timeout=4).json()
+        
+        # dYdX renvoie du plus récent au plus ancien, on inverse
+        df = pd.DataFrame(res['candles'])[::-1].reset_index(drop=True)
+        df = df.rename(columns={'high': 'High', 'low': 'Low', 'close': 'Close'})
         df['High'] = df['High'].astype(float)
         df['Low'] = df['Low'].astype(float)
         df['Close'] = df['Close'].astype(float)
@@ -159,7 +157,7 @@ with st.spinner("Synchronisation des flux temps réel..."):
     if asset_type == "Forex":
         df_1h, df_15m, df_5m = get_forex_candles(ticker_symbol, "1h"), get_forex_candles(ticker_symbol, "15m"), get_forex_candles(ticker_symbol, "5m")
     else:
-        src = get_hyperliquid_candles if api_source == "Hyperliquid (Perps)" else get_okx_candles
+        src = get_dydx_candles if api_source == "dYdX (Perps)" else get_okx_candles
         df_1h, df_15m, df_5m = src(ticker_symbol, "1h"), src(ticker_symbol, "15m"), src(ticker_symbol, "5m")
 
     if df_1h is not None and df_15m is not None and df_5m is not None:
@@ -188,12 +186,12 @@ if data_1h and data_15m and data_5m:
     perfect_sell_alignment = not is_macro_bull and sell_5m and sell_15m and sell_1h
     
     if perfect_buy_alignment:
-        msg = f"🚀 *TRIPLE ALIGNEMENT ACHAT* 🚀\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Haussière !"
+        msg = f"🚀 *TRIPLE ALIGNEMENT ACHAT* 🚀\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Haussière (dYdX/OKX) !"
         send_telegram_alert(msg)
         st.success("🔔 ALERTE TRIPLE ÉCRAN ENVOYÉE !")
         
     elif perfect_sell_alignment:
-        msg = f"💥 *TRIPLE ALIGNEMENT VENTE* 💥\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Baissière !"
+        msg = f"💥 *TRIPLE ALIGNEMENT VENTE* 💥\n• Actif : {ticker_symbol}\n• Prix : {data_5m['close']}\n\n🔥 Structure 5m, 15m et 1H parfaitement Baissière (dYdX/OKX) !"
         send_telegram_alert(msg)
         st.success("🔔 ALERTE TRIPLE ÉCRAN ENVOYÉE !")
 
