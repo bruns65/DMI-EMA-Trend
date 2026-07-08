@@ -1,114 +1,97 @@
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
 
-def get_forex_candles(pair):
+def get_coinbase_candles(symbol, timeframe):
+    """ Récupère les bougies depuis l'API publique de Coinbase """
+    granularity_map = {"5m": 300, "15m": 900, "1h": 3600}
+    granularity = granularity_map.get(timeframe, 300)
+    
+    cb_symbol = f"{symbol}-USD"
+    url = f"https://api.exchange.coinbase.com/products/{cb_symbol}/candles"
+    params = {"granularity": granularity, "limit": 100}
+    
     try:
-        clean_pair = pair.replace("/", "").upper()
-        spot_url = "https://open.er-api.com/v6/latest/USD"
-        res_spot = requests.get(spot_url, timeout=4).json()
-        base_currency = clean_pair[:3]
-        target_currency = clean_pair[3:]
-        
-        rate = res_spot["rates"][target_currency] if base_currency == "USD" else 1 / res_spot["rates"][base_currency]
-        if base_currency != "USD" and target_currency != "USD":
-            rate = rate * res_spot["rates"][target_currency]
-        
-        np.random.seed(42)
-        returns = np.random.normal(0, 0.0004, 250)
-        price_series = rate * (1 + returns).cumprod()
-        price_series = price_series * (rate / price_series[-1])
-        
-        return pd.DataFrame({
-            'Close': price_series,
-            'High': price_series * (1 + abs(np.random.normal(0, 0.0002, 250))),
-            'Low': price_series * (1 - abs(np.random.normal(0, 0.0002, 250)))
-        })
-    except:
-        return None
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            # Coinbase renvoie [time, low, high, open, close, volume]
+            df = pd.DataFrame(data, columns=['time', 'low', 'high', 'open', 'close', 'volume'])
+            df = df.sort_values('time').reset_index(drop=True)
+            return df
+    except Exception as e:
+        print(f"Erreur API Coinbase ({symbol} {timeframe}): {e}")
+    return None
 
-def get_okx_candles(symbol, interval, limit=250):
-    try:
-        okx_intervals = {"5m": "5m", "15m": "15m", "1h": "1H"}
-        okx_inst = f"{symbol.upper()}-USDT"
-        url = f"https://www.okx.com/api/v5/market/candles?instId={okx_inst}&bar={okx_intervals.get(interval, '1H')}&limit={limit}"
-        res = requests.get(url, timeout=4).json()
-        df = pd.DataFrame(res['data'])[::-1].reset_index(drop=True)
-        df.columns = ['Time', 'Open', 'High', 'Low', 'Close', 'Vol', 'VolCcy', 'VolCcyQuote', 'State']
-        df['High'] = df['High'].astype(float)
-        df['Low'] = df['Low'].astype(float)
-        df['Close'] = df['Close'].astype(float)
-        return df
-    except:
+def compute_dmi_and_ema(df, period=14, compute_ema=False):
+    """ Calcule le DMI, l'ADX, l'EMA 200, le MA/EMA Cross 10 et le Stoch RSI """
+    if df is None or len(df) < 30:
         return None
-
-def get_coinbase_candles(symbol, interval, limit=150):
-    try:
-        # Conversion des intervalles pour Coinbase (en secondes)
-        cb_intervals = {"5m": 300, "15m": 900, "1h": 3600}
-        granularity = cb_intervals.get(interval, 3600)
-        pair = f"{symbol.upper()}-USDT"
         
-        # Calcul des fenêtres de temps pour éviter les refus
-        end_time = datetime.utcnow()
-        start_time = end_time - timedelta(seconds=granularity * limit)
+    df = df.copy()
+    
+    # 1. CALCUL COMPOSANTES DMI / ADX
+    df['UpMove'] = df['high'].diff()
+    df['DownMove'] = df['low'].diff() * -1
+    
+    df['PlusDM'] = np.where((df['UpMove'] > df['DownMove']) & (df['UpMove'] > 0), df['UpMove'], 0)
+    df['MinusDM'] = np.where((df['DownMove'] > df['UpMove']) & (df['DownMove'] > 0), df['DownMove'], 0)
+    
+    # True Range
+    df['ATR_1'] = df['high'] - df['low']
+    df['ATR_2'] = abs(df['high'] - df['close'].shift(1))
+    df['ATR_3'] = abs(df['low'] - df['close'].shift(1))
+    df['TR'] = df[['ATR_1', 'ATR_2', 'ATR_3']].max(axis=1)
+    
+    # Lissage Wilder
+    TR_smooth = df['TR'].ewm(alpha=1/period, adjust=False).mean()
+    PlusDM_smooth = df['PlusDM'].ewm(alpha=1/period, adjust=False).mean()
+    MinusDM_smooth = df['MinusDM'].ewm(alpha=1/period, adjust=False).mean()
+    
+    df['DI+'] = (PlusDM_smooth / TR_smooth) * 100
+    df['DI-'] = (MinusDM_smooth / TR_smooth) * 100
+    
+    DX = (abs(df['DI+'] - df['DI-']) / (df['DI+'] + df['DI-'])) * 100
+    df['ADX'] = DX.ewm(alpha=1/period, adjust=False).mean()
+    
+    # 2. CALCUL EMA 200 STRUCUTUREL
+    if compute_ema:
+        df['EMA_200'] = df['close'].ewm(span=200, adjust=False).mean()
         
-        url = f"https://api.exchange.coinbase.com/products/{pair}/candles"
-        params = {
-            "start": start_time.isoformat(),
-            "end": end_time.isoformat(),
-            "granularity": granularity
-        }
-        
-        res = requests.get(url, params=params, timeout=4).json()
-        
-        # Structure Coinbase : [time, low, high, open, close, volume]
-        # Trié du plus récent au plus ancien, on inverse
-        df = pd.DataFrame(res, columns=['Time', 'Low', 'High', 'Open', 'Close', 'Volume'])[::-1].reset_index(drop=True)
-        
-        df['High'] = df['High'].astype(float)
-        df['Low'] = df['Low'].astype(float)
-        df['Close'] = df['Close'].astype(float)
-        return df
-    except:
-        return None
-
-def compute_dmi_and_ema(df, adx_period=14, compute_ema=False):
-    try:
-        if df is None or df.empty:
-            return None
-            
-        if compute_ema:
-            df['EMA_200'] = df['Close'].ewm(span=200, adjust=False).mean()
-            
-        df['up_move'] = df['High'].diff()
-        df['down_move'] = df['Low'].shift(1) - df['Low']
-        
-        df['plus_dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
-        df['minus_dm'] = np.where((df['down_move'] > df['up_move']) & (df['down_move'] > 0), df['down_move'], 0)
-        
-        df['tr1'] = df['High'] - df['Low']
-        df['tr2'] = abs(df['High'] - df['Close'].shift(1))
-        df['tr3'] = abs(df['Low'] - df['Close'].shift(1))
-        df['TR'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
-        
-        df['TR_smooth'] = df['TR'].ewm(alpha=1/adx_period, adjust=False).mean()
-        df['DM_plus_smooth'] = df['plus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
-        df['DM_minus_smooth'] = df['minus_dm'].ewm(alpha=1/adx_period, adjust=False).mean()
-        
-        df['DI_plus'] = (df['DM_plus_smooth'] / df['TR_smooth']) * 100
-        df['DI_minus'] = (df['DM_minus_smooth'] / df['TR_smooth']) * 100
-        
-        df['DX'] = (abs(df['DI_plus'] - df['DI_minus']) / (df['DI_plus'] + df['DI_minus'])) * 100
-        df['ADX'] = df['DX'].ewm(alpha=1/adx_period, adjust=False).mean()
-        
-        return {
-            "close": df['Close'].iloc[-1], 
-            "DI+": round(df['DI_plus'].iloc[-1], 1), 
-            "DI-": round(df['DI_minus'].iloc[-1], 1), 
-            "ADX": round(df['ADX'].iloc[-1], 1), 
-            "EMA_200": df['EMA_200'].iloc[-1] if compute_ema else None
-        }
-    except:
-        return None
+    # 3. FILTRE MA/EMA CROSS (10) REPERÉ SUR TON ÉCRAN
+    df['MA_10'] = df['close'].rolling(window=10).mean()
+    df['EMA_10'] = df['close'].ewm(span=10, adjust=False).mean()
+    
+    # 4. LE DÉTECTEUR FLASH : STOCH RSI (14, 14, 3, 3)
+    # Étape A : Calcul du RSI standard
+    delta = df['close'].diff()
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    df['RSI'] = 100 - (100 / (1 + rs))
+    
+    # Étape B : Application de la Stochastique sur le RSI
+    rsi_min = df['RSI'].rolling(window=14).min()
+    rsi_max = df['RSI'].rolling(window=14).max()
+    df['StochRSI_K'] = ((df['RSI'] - rsi_min) / (rsi_max - rsi_min + 1e-10)) * 100
+    # Lissage standard %K sur 3 périodes
+    df['StochRSI_K'] = df['StochRSI_K'].rolling(window=3).mean()
+    
+    # Extraction des 2 dernières lignes pour analyser la pente (pente montante ou descendante)
+    last_row = df.iloc[-1]
+    prev_row = df.iloc[-2]
+    
+    result = {
+        "close": last_row["close"],
+        "DI+": round(last_row["DI+"], 1),
+        "DI-": round(last_row["DI-"], 1),
+        "ADX": round(last_row["ADX"], 1),
+        "ADX_prev": round(prev_row["ADX"], 1), # Pour capter la raideur de la pente
+        "MA_10": last_row["MA_10"],
+        "EMA_10": last_row["EMA_10"],
+        "StochRSI_K": round(last_row["StochRSI_K"], 2),
+        "EMA_200": last_row["EMA_200"] if compute_ema else None
+    }
+    return result
